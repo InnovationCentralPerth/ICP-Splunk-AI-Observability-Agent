@@ -27,6 +27,9 @@ diagnose_demo_cam.py
 observability_agent.py
 observability-agent.service
 
+# Demo / submission assets (generated, not part of codebase)
+demo_narration.*
+
 # Editor / OS
 .DS_Store
 .idea/

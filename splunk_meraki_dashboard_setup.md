@@ -406,10 +406,12 @@ Install order matters: Python Scientific Computing must be installed before AI T
 ### 8.1 Overview
 A Python FastAPI application that:
 - Polls Meraki APIs every 120 seconds (sensors, switch, cameras)
-- Posts all data to Splunk HEC
+- Posts all data to Splunk HEC (`icp:sensor_latest`, `icp:switch_port_status`, `icp:camera_analytics`)
+- Queries Splunk MLTK AI via REST API (`anomalydetection` + `predict/LLP5`) every poll cycle
 - Detects anomalies against configured thresholds
-- Generates AI narratives via OpenRouter
-- Exposes a web chatbot UI on port 5000
+- **Automated Response Engine**: when Splunk AI flags an anomaly, generates an LLM incident report, creates a Splunk saved alert via REST API (`POST /services/saved/searches`), and posts `icp:automated_response` events back to Splunk
+- Routes queries across three LLMs via OpenRouter (GPT-4o mini / Llama 3.3 70B / Gemini Flash 2.0)
+- Exposes a web dashboard + chatbot UI on port 5000
 
 ### 8.2 Device Inventory
 | Device | Serial | Data |
@@ -459,28 +461,37 @@ pip install requests fastapi uvicorn httpx python-dotenv
 ```ini
 # Meraki
 MERAKI_API_KEY=<your_meraki_api_key>
+MERAKI_ORG_ID=<your_org_id>         # GET /organizations — ICP Perth: 703124491823221434
+MERAKI_NETWORK_ID=<your_network_id> # GET /organizations/{id}/networks — ICP Building: L_703124491823231484
 
 # Splunk HEC
 SPLUNK_HEC_URL=https://127.0.0.1:8088/services/collector
 SPLUNK_HEC_TOKEN=<your_hec_token>
+
+# Splunk Management API (required for Splunk AI: anomalydetection + predict/LLP5)
+SPLUNK_MGMT_URL=https://127.0.0.1:8089
+SPLUNK_USERNAME=<splunk-user>
+SPLUNK_PASSWORD=<splunk-password>
 
 # OpenRouter AI
 OPENROUTER_API_KEY=sk-or-v1-...
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_REFERER=https://curtin.edu.au
 
-# Models
-MODEL_ANALYST=openai/gpt-oss-120b:free
-MODEL_COMPOSER=meta-llama/llama-3.3-70b-instruct:free
-MODEL_FALLBACK=openai/gpt-oss-20b:free
+# Models (in-app switching demonstrated at runtime)
+MODEL_ANALYST=openai/gpt-4o-mini
+MODEL_COMPOSER=meta-llama/llama-3.3-70b-instruct
+MODEL_FALLBACK=google/gemini-2.0-flash-001
 
 # Polling
 POLL_INTERVAL=120
 ```
 
+> **Critical:** `MERAKI_ORG_ID` and `MERAKI_NETWORK_ID` must be set — if missing, all sensor/switch/camera polls return 404 and `temperature`/`humidity` will remain `null` in the UI.
+
 > **Critical:** Variable name is `SPLUNK_HEC_TOKEN` not `SPLUNK_HEC_KEY`.
 
-> **OpenRouter rate limiting:** Free tier models are rate-limited. Add credits at `https://openrouter.ai/settings/credits` to avoid 429 errors during demos.
+> **OpenRouter rate limiting:** Add credits at `https://openrouter.ai/settings/credits` to avoid 429 errors during demos.
 
 ### 8.7 Anomaly Detection Thresholds
 | Signal | Threshold | Severity |
@@ -497,7 +508,9 @@ POLL_INTERVAL=120
 | `icp:sensor_latest` | MT10 temperature, humidity, door, battery |
 | `icp:switch_port_status` | MS355 per-port traffic, PoE, clients |
 | `icp:camera_analytics` | MV12W people count per zone |
-| `icp:anomaly` | Detected anomaly events |
+| `icp:anomaly` | Threshold-based anomaly events |
+| `icp:splunk_ai_insight` | Summary of Splunk MLTK AI results per poll cycle |
+| `icp:automated_response` | LLM-generated incident reports + Splunk saved alert creation events |
 
 ### 8.9 Run as systemd Service (Auto-start on Reboot)
 
@@ -548,13 +561,16 @@ sudo systemctl restart icp-agent
 # Check service status
 sudo systemctl status icp-agent
 
-# Test API
+# Test API — sensor state, anomalies, Splunk AI insights
 curl -s http://127.0.0.1:5000/api/status | python3 -m json.tool
 
-# Test AI chat
+# Test automated responses (Splunk AI → LLM → Splunk loop)
+curl -s http://127.0.0.1:5000/api/responses | python3 -m json.tool
+
+# Test AI chat (LLM should cite Splunk AI findings explicitly)
 curl -s -X POST http://127.0.0.1:5000/api/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "What is the current building status?"}' \
+  -d '{"message": "What is Splunk AI telling us about the building?"}' \
   | python3 -c "import sys,json; print(json.load(sys.stdin)['response'])"
 ```
 
@@ -572,7 +588,9 @@ All data lands in `index=main`.
 | `icp:sensor_latest` | ICP Agent | Latest MT10 readings | 2 min |
 | `icp:switch_port_status` | ICP Agent | Latest switch port data | 2 min |
 | `icp:camera_analytics` | ICP Agent | MV12W people count | 2 min |
-| `icp:anomaly` | ICP Agent | Detected anomalies | On detection |
+| `icp:anomaly` | ICP Agent | Threshold-based anomaly events | On detection |
+| `icp:splunk_ai_insight` | ICP Agent | Splunk MLTK AI results summary | 2 min |
+| `icp:automated_response` | ICP Agent | LLM incident reports + saved alert events | On anomaly |
 
 ---
 
@@ -679,6 +697,7 @@ sudo journalctl -u meraki-switch-poller -f
 | HEC `Connection refused` | HEC not enabled, or using HTTP not HTTPS | Enable via CLI; use `https://` with `-k` flag |
 | `round()` eval error on dotted fields | Splunk interprets dot as nested accessor | Wrap in single quotes: `round('temperature.celsius',1)` |
 | Splunk startup invalid key warnings | Keys deprecated in Splunk 10.2.3 | Remove from web.conf: `SplunkdConnectionTimeout`, `allowEmbedTokenAuth`, `hostnameAndPort` |
+| `temperature`/`humidity` show `null` in UI | `MERAKI_ORG_ID` or `MERAKI_NETWORK_ID` missing from `.env` | Add both vars to `.env` — see 8.6; ICP values: ORG `703124491823221434`, NET `L_703124491823231484` |
 | OpenRouter 404 on chat | Model ID not available on free tier | Check available models; update `.env` MODEL_ vars |
 | OpenRouter 429 rate limit | Free tier shared rate limit | Add credits at openrouter.ai/settings/credits |
 | MV camera people count shows zeros | Analytics bucket incomplete (< 1 hour) | Use 1h lookback; filter for non-zero buckets |
@@ -688,4 +707,4 @@ sudo journalctl -u meraki-switch-poller -f
 
 ---
 
-*Document updated: June 2026 | ICP Building, Curtin University, Bentley WA*
+*Document updated: June 2026 (v2 — Splunk AI MLTK + Automated Response Engine) | ICP Building, Curtin University, Bentley WA*

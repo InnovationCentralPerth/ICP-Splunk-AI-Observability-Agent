@@ -225,6 +225,7 @@ icp_agent.env                 # Environment variable template (copy to .env)
 icp-agent.service             # systemd service unit
 test_splunk_ai.py             # Validates Splunk MLTK connectivity and AI commands
 architecture.svg              # Architecture diagram
+ICP transparent logo.png      # ICP logo used in web UI header
 icp_splunk_ai_observability_poster.html  # A4 solution overview poster
 icp_building_sensor_dashboard.xml        # Splunk dashboard XML for sensor data
 icp_sw01_dashboard.xml                   # Splunk dashboard XML for switch data
