@@ -48,7 +48,7 @@ from typing import Optional
 import requests
 import httpx
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 import uvicorn
 from dotenv import load_dotenv
@@ -905,8 +905,14 @@ def polling_loop():
 # ── FastAPI app ──────────────────────────────────────────────────────────────
 app = FastAPI(title="ICP Splunk AI Observability Agent : Splunk Enterprise", version="2.0")
 
+_LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ICP transparent logo.png")
+
 class ChatRequest(BaseModel):
     message: str
+
+@app.get("/static/icp-logo")
+async def serve_icp_logo():
+    return FileResponse(_LOGO_PATH, media_type="image/png")
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -1009,13 +1015,13 @@ HTML_UI = """<!DOCTYPE html>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: 'Segoe UI', sans-serif; background: #0d1117; color: #e6edf3; min-height: 100vh; }
-  header { background: #161b22; border-bottom: 1px solid #30363d; padding: 16px 24px;
-           display: flex; align-items: center; gap: 12px; }
-  .logo { width: 36px; height: 36px; background: #EF9F27; border-radius: 6px;
-          display: flex; align-items: center; justify-content: center;
-          font-weight: 800; font-size: 14px; color: #000; }
+  header { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 24px;
+           display: flex; align-items: center; gap: 14px; }
+  .logo { height: 40px; width: auto; display: block; }
   header h1 { font-size: 18px; font-weight: 600; }
-  header span { font-size: 12px; color: #8b949e; margin-left: auto; }
+  .header-partners { display: flex; align-items: center; gap: 10px; }
+  .header-partners img { height: 22px; width: auto; filter: brightness(0) invert(1); opacity: 0.85; }
+  header > span#poll-status { font-size: 12px; color: #8b949e; margin-left: auto; }
   .main { display: grid; grid-template-columns: 340px 1fr; gap: 0; height: calc(100vh - 61px); }
   .sidebar { background: #161b22; border-right: 1px solid #30363d; padding: 16px; overflow-y: auto; }
   .sidebar h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 1px;
@@ -1085,8 +1091,12 @@ HTML_UI = """<!DOCTYPE html>
 </head>
 <body>
 <header>
-  <div class="logo">ICP</div>
+  <img class="logo" src="/static/icp-logo" alt="ICP">
   <h1>ICP Splunk AI Observability Agent : Splunk Enterprise</h1>
+  <div class="header-partners">
+    <img src="https://upload.wikimedia.org/wikipedia/commons/7/72/Meraki_Logo_2016_transparent.svg" alt="Cisco Meraki">
+    <img src="https://upload.wikimedia.org/wikipedia/commons/1/1d/Splunk_logo.svg" alt="Splunk">
+  </div>
   <span id="poll-status"><span class="pulse"></span>Initialising...</span>
 </header>
 <div class="main">
