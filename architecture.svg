@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 236"
+         style="width:100%;height:auto;display:block;"
+         aria-label="ICP Solution Architecture Diagram">
+      <defs>
+        <marker id="ah" markerWidth="7" markerHeight="5" refX="6.5" refY="2.5" orient="auto">
+          <polygon points="0 0,7 2.5,0 5" fill="#888"/>
+        </marker>
+      </defs>
+
+      <!-- Node 1: Meraki Hardware -->
+      <rect x="4" y="8" width="138" height="192" rx="7" fill="#0077b6"/>
+      <text x="73" y="25" text-anchor="middle" font-size="8.5" font-weight="700" fill="white" font-family="Arial,sans-serif">MERAKI HARDWARE</text>
+      <line x1="9" y1="31" x2="137" y2="31" stroke="rgba(255,255,255,0.3)" stroke-width="0.5"/>
+      <text x="14" y="46" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; MV12W Cameras x3</text>
+      <text x="14" y="59" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; MV Sense AI Analytics</text>
+      <text x="14" y="72" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; MT10 Env Sensor</text>
+      <text x="14" y="85" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; MS355 Network Switch</text>
+      <text x="14" y="98" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; MX105 Security Gateway</text>
+
+      <!-- Arrow 1 -->
+      <line x1="142" y1="104" x2="170" y2="104" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- Node 2: Meraki Cloud API -->
+      <rect x="172" y="8" width="126" height="192" rx="7" fill="#0c2340"/>
+      <text x="235" y="25" text-anchor="middle" font-size="8.5" font-weight="700" fill="white" font-family="Arial,sans-serif">MERAKI CLOUD API</text>
+      <line x1="177" y1="31" x2="293" y2="31" stroke="rgba(255,255,255,0.3)" stroke-width="0.5"/>
+      <text x="182" y="46" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Zone analytics history</text>
+      <text x="182" y="59" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; People count / occupancy</text>
+      <text x="182" y="72" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Temperature &amp; humidity</text>
+      <text x="182" y="85" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Switch port telemetry</text>
+      <text x="182" y="98" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Client count &amp; PoE data</text>
+
+      <!-- Arrow 2 -->
+      <line x1="298" y1="104" x2="326" y2="104" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- Node 3: ICP Agent -->
+      <rect x="328" y="8" width="138" height="192" rx="7" fill="#1b4332"/>
+      <text x="397" y="23" text-anchor="middle" font-size="8.5" font-weight="700" fill="white" font-family="Arial,sans-serif">ICP OBSERVABILITY</text>
+      <text x="397" y="35" text-anchor="middle" font-size="8.5" font-weight="700" fill="white" font-family="Arial,sans-serif">AGENT (Python)</text>
+      <line x1="333" y1="41" x2="461" y2="41" stroke="rgba(255,255,255,0.3)" stroke-width="0.5"/>
+      <text x="338" y="56" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Poll Meraki API (2 min)</text>
+      <text x="338" y="69" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Push events to Splunk HEC</text>
+      <text x="338" y="82" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Query Splunk AI results</text>
+      <text x="338" y="95" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; LLM narrative engine</text>
+      <text x="338" y="108" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; FastAPI chatbot UI</text>
+      <text x="338" y="121" font-size="7" fill="#86efac" font-family="Arial,sans-serif">&#x25B8; Auto-response engine &#x26A1;</text>
+
+      <!-- Arrow 3a: Agent to Splunk -->
+      <line x1="466" y1="72" x2="504" y2="54" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- Arrow 3b: Agent to OpenRouter -->
+      <line x1="466" y1="135" x2="504" y2="155" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- Node 4: Splunk Enterprise + Splunk AI (taller) -->
+      <rect x="506" y="8" width="130" height="118" rx="7" fill="#c44b0b"/>
+      <text x="571" y="24" text-anchor="middle" font-size="8.5" font-weight="700" fill="white" font-family="Arial,sans-serif">SPLUNK ENTERPRISE</text>
+      <text x="571" y="36" text-anchor="middle" font-size="7" font-weight="600" fill="#ffd0b0" font-family="Arial,sans-serif">+ Splunk AI (MLTK)</text>
+      <line x1="511" y1="41" x2="631" y2="41" stroke="rgba(255,255,255,0.3)" stroke-width="0.5"/>
+      <text x="515" y="54" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; HEC structured events</text>
+      <text x="515" y="65" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; anomalydetection (SPL)</text>
+      <text x="515" y="76" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; predict / LLP5 forecast</text>
+      <text x="515" y="87" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Real-time SPL dashboards</text>
+      <text x="515" y="98" font-size="7" fill="#86efac" font-family="Arial,sans-serif">&#x25B8; icp:automated_response &#x26A1;</text>
+      <text x="515" y="109" font-size="7" fill="#86efac" font-family="Arial,sans-serif">&#x25B8; Saved Alerts (REST API) &#x26A1;</text>
+
+      <!-- Node 5: OpenRouter LLMs -->
+      <rect x="506" y="138" width="130" height="62" rx="7" fill="#4a1d96"/>
+      <text x="571" y="154" text-anchor="middle" font-size="8.5" font-weight="700" fill="white" font-family="Arial,sans-serif">OPENROUTER LLMs</text>
+      <line x1="511" y1="159" x2="631" y2="159" stroke="rgba(255,255,255,0.3)" stroke-width="0.5"/>
+      <text x="515" y="172" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; GPT-4o mini (analyst)</text>
+      <text x="515" y="183" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Llama 3.3 70B (chat)</text>
+      <text x="515" y="194" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Gemini Flash 2.0 (fallback)</text>
+
+      <!-- Arrow 4: Splunk to Dashboard -->
+      <line x1="636" y1="38" x2="671" y2="28" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- Arrow Splunk to Auto-Response output -->
+      <line x1="636" y1="82" x2="671" y2="78" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- Arrow 5: OpenRouter to AI Chat -->
+      <line x1="636" y1="172" x2="671" y2="155" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- Output 1: Dashboard -->
+      <rect x="673" y="14" width="84" height="32" rx="6" fill="#fff3ee" stroke="#c44b0b" stroke-width="1.5"/>
+      <text x="715" y="29" text-anchor="middle" font-size="8.5" font-weight="700" fill="#c44b0b" font-family="Arial,sans-serif">&#x2460; DASHBOARD</text>
+      <text x="715" y="40" text-anchor="middle" font-size="6" fill="#a0522d" font-family="Arial,sans-serif">Real-time SPL panels</text>
+
+      <!-- Output 2: Auto-Response (NEW) -->
+      <rect x="673" y="58" width="84" height="44" rx="6" fill="#f0fdf4" stroke="#22c55e" stroke-width="1.5"/>
+      <text x="715" y="73" text-anchor="middle" font-size="8" font-weight="700" fill="#166534" font-family="Arial,sans-serif">&#x26A1; AUTO-RESPONSE</text>
+      <text x="715" y="84" text-anchor="middle" font-size="6" fill="#166534" font-family="Arial,sans-serif">LLM incident report</text>
+      <text x="715" y="94" text-anchor="middle" font-size="6" fill="#166534" font-family="Arial,sans-serif">Splunk Saved Alerts</text>
+
+      <!-- Output 3: AI Chat App -->
+      <rect x="673" y="115" width="84" height="42" rx="6" fill="#f3f0ff" stroke="#4a1d96" stroke-width="1.5"/>
+      <text x="715" y="131" text-anchor="middle" font-size="8.5" font-weight="700" fill="#4a1d96" font-family="Arial,sans-serif">&#x2461; AI CHAT APP</text>
+      <text x="715" y="142" text-anchor="middle" font-size="6" fill="#5b21b6" font-family="Arial,sans-serif">Natural language Q&amp;A</text>
+      <text x="715" y="152" text-anchor="middle" font-size="6" fill="#5b21b6" font-family="Arial,sans-serif">Splunk AI cited in responses</text>
+
+      <!-- Closed-loop annotation strip -->
+      <rect x="4" y="204" width="752" height="28" rx="4" fill="#0d1117" stroke="#30363d" stroke-width="0.7"/>
+      <text x="12" y="216" font-size="6.5" font-family="Arial,sans-serif">
+        <tspan font-weight="700" fill="#60a5fa">SPLUNK AI LOOP</tspan>
+        <tspan fill="#93c5fd" dx="4">&#x25B8; anomalydetection + predict/LLP5 results queried back by Agent &#x25B8; injected into every LLM prompt as grounded context</tspan>
+      </text>
+      <text x="12" y="228" font-size="6.5" font-family="Arial,sans-serif">
+        <tspan font-weight="700" fill="#4ade80">AUTO-RESPONSE LOOP</tspan>
+        <tspan fill="#86efac" dx="4">&#x25B8; On anomaly: LLM generates incident report &#x25B8; icp:automated_response pushed to Splunk &#x25B8; Splunk Saved Alert created via REST API</tspan>
+      </text>
+    </svg>

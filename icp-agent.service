@@ -1,0 +1,17 @@
+[Unit]
+Description=ICP Building Observability Agent
+After=network.target
+
+[Service]
+Type=simple
+User=stanley
+WorkingDirectory=/home/stanley/projects/icp-agent
+EnvironmentFile=/home/stanley/projects/icp-agent/.env
+ExecStart=/usr/bin/python3 /home/stanley/projects/icp-agent/icp_observability_agent.py
+Restart=always
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

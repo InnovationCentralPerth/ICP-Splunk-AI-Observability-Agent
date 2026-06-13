@@ -1,15 +1,34 @@
-# Environment — never commit real credentials
+# Credentials — NEVER commit
 .env
+*.env
+
+# Allow the template file (contains only placeholders, no real credentials)
+!icp_agent.env
+!.env.example
 
 # Python
 .venv/
+venv/
 __pycache__/
 *.pyc
 *.pyo
+*.egg-info/
 
 # Splunk license file
 *.License
 *.lic
 
-# OS
+# Diagnostic / debug scripts (hardware-specific, not part of project)
+check_cam.py
+compare_cam_settings.py
+diagnose_demo_cam.py
+
+# Old / superseded versions
+observability_agent.py
+observability-agent.service
+
+# Editor / OS
 .DS_Store
+.idea/
+.vscode/
+*.swp
