@@ -1,6 +1,7 @@
 [Unit]
 Description=ICP Building Observability Agent
-After=network.target
+After=network-online.target tailscaled.service icp-funnel.service
+Wants=network-online.target icp-funnel.service
 
 [Service]
 Type=simple

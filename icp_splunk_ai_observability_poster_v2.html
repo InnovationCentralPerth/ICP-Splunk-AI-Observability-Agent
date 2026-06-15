@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ICP Smart Building Observability — Solution Overview v2</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
+
+    @page { size: A4 portrait; margin: 10mm; }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', 'Segoe UI', Arial, sans-serif;
+      background: #ffffff;
+      color: #1a1a2e;
+      width: 190mm;
+      min-height: 277mm;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+    }
+
+    /* ── HEADER ─────────────────────────────────────────────── */
+    header {
+      background: linear-gradient(135deg, #0c2340 0%, #00559e 55%, #00bceb 100%);
+      color: white;
+      padding: 16px 20px 14px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 16px;
+      border-radius: 8px 8px 0 0;
+    }
+
+    .org-block {
+      display: flex;
+      align-items: center;
+      border-right: 1px solid rgba(255,255,255,0.25);
+      padding-right: 16px;
+    }
+
+    .org-block img {
+      height: 54px;
+      width: auto;
+      display: block;
+    }
+
+    .title-block { text-align: center; }
+
+    .title-block h1 {
+      font-size: 17pt;
+      font-weight: 900;
+      letter-spacing: -0.5px;
+      line-height: 1.1;
+    }
+
+    .title-block .tagline {
+      font-size: 8.5pt;
+      font-weight: 400;
+      opacity: 0.85;
+      margin-top: 4px;
+      letter-spacing: 0.3px;
+    }
+
+    .logo-block {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      border-left: 1px solid rgba(255,255,255,0.25);
+      padding-left: 16px;
+    }
+
+    .logo-block img {
+      display: block;
+      height: 22px;
+      width: auto;
+      filter: brightness(0) invert(1);
+    }
+
+    /* ── SECTION LABEL ──────────────────────────────────────── */
+    .section-label {
+      font-size: 7pt;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1.5px;
+      color: #888;
+      margin-bottom: 6px;
+      padding-left: 2px;
+    }
+
+    /* ── ARCHITECTURE DIAGRAM ───────────────────────────────── */
+    .diagram-wrapper {
+      padding: 10px 16px 6px;
+      background: #ffffff;
+      margin: 0;
+    }
+
+    /* ── DATA FLOW STRIP ────────────────────────────────────── */
+    .data-strip {
+      background: #eef2ff;
+      border: 1px solid #c7d2fe;
+      border-radius: 5px;
+      padding: 5px 12px;
+      font-size: 7.5pt;
+      color: #4338ca;
+      text-align: center;
+      margin: 6px 16px 0;
+      font-weight: 500;
+    }
+
+    .data-strip span {
+      margin: 0 6px;
+    }
+
+    .data-strip span::before {
+      content: "· ";
+      opacity: 0.5;
+    }
+
+    .data-strip span:first-child::before { content: ""; }
+
+    /* ── DELIVERABLES ───────────────────────────────────────── */
+    .deliverables {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 10px 16px 0;
+    }
+
+    .card {
+      border-radius: 8px;
+      padding: 14px 14px 12px;
+      border: 2px solid;
+    }
+
+    .card-splunk { border-color: #c44b0b; }
+    .card-ai     { border-color: #4a1d96; }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 9px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid #eee;
+    }
+
+    .card-num {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 800;
+      font-size: 12pt;
+      color: white;
+      flex-shrink: 0;
+    }
+
+    .card-splunk .card-num { background: #c44b0b; }
+    .card-ai     .card-num { background: #4a1d96; }
+
+    .card-title {
+      font-size: 11pt;
+      font-weight: 800;
+      line-height: 1.15;
+    }
+
+    .card-splunk .card-title { color: #c44b0b; }
+    .card-ai     .card-title { color: #4a1d96; }
+
+    .card-sub {
+      font-size: 7.5pt;
+      color: #888;
+      font-weight: 400;
+      margin-top: 1px;
+    }
+
+    .card ul {
+      list-style: none;
+      font-size: 8.5pt;
+      line-height: 1.65;
+      color: #333;
+    }
+
+    .card ul li {
+      padding-left: 13px;
+      position: relative;
+    }
+
+    .card ul li::before {
+      content: "•";
+      position: absolute;
+      left: 0;
+      color: #bbb;
+      font-size: 10pt;
+      line-height: 1.5;
+    }
+
+    .card-splunk ul li::before { color: #f2a07f; }
+    .card-ai     ul li::before { color: #a78bfa; }
+
+    /* ── FOOTER ─────────────────────────────────────────────── */
+    footer {
+      margin-top: auto;
+      padding: 9px 16px;
+      background: #0c2340;
+      color: white;
+      border-radius: 0 0 8px 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .footer-org {
+      font-size: 8pt;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    .footer-org span {
+      color: #FFD100;
+    }
+
+    .footer-desc {
+      font-size: 7pt;
+      opacity: 0.6;
+      margin-top: 1px;
+    }
+
+    .tech-stack {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px;
+      justify-content: flex-end;
+    }
+
+    .pill {
+      background: rgba(255,255,255,0.12);
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 20px;
+      padding: 2px 8px;
+      font-size: 7pt;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+
+    .pill-amber {
+      background: rgba(251,146,60,0.2);
+      border-color: rgba(251,146,60,0.5);
+      color: #fed7aa;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ── HEADER ─────────────────────────────────────── -->
+  <header>
+    <div class="org-block">
+      <img src="ICP transparent logo.png" alt="Innovation Central Perth — Curtin University">
+    </div>
+
+    <div class="title-block">
+      <h1>AI-Powered Smart Building Observability</h1>
+      <div class="tagline">Cisco Meraki Infrastructure &nbsp;·&nbsp; Splunk Enterprise &nbsp;·&nbsp; Camera AI (24h ML) &nbsp;·&nbsp; Generative AI — Live Campus Deployment</div>
+    </div>
+
+    <div class="logo-block">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/7/72/Meraki_Logo_2016_transparent.svg"
+           alt="Cisco Meraki">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/1/1d/Splunk_logo.svg"
+           alt="Splunk">
+    </div>
+  </header>
+
+  <!-- ── ARCHITECTURE DIAGRAM (SVG) ──────────────────── -->
+  <div class="diagram-wrapper">
+    <div class="section-label">Solution Architecture &amp; Data Flow — Three-Layer AI Detection</div>
+
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 248"
+         style="width:100%;height:auto;display:block;"
+         aria-label="ICP Solution Architecture Diagram v2">
+      <defs>
+        <marker id="ah" markerWidth="7" markerHeight="5" refX="6.5" refY="2.5" orient="auto">
+          <polygon points="0 0,7 2.5,0 5" fill="#888"/>
+        </marker>
+        <marker id="ah-amber" markerWidth="7" markerHeight="5" refX="6.5" refY="2.5" orient="auto">
+          <polygon points="0 0,7 2.5,0 5" fill="#f59e0b"/>
+        </marker>
+      </defs>
+
+      <!-- Node 1: Meraki Hardware -->
+      <rect x="4" y="8" width="138" height="192" rx="7" fill="#0077b6"/>
+      <text x="73" y="25" text-anchor="middle" font-size="8.5" font-weight="700" fill="white" font-family="Arial,sans-serif">MERAKI HARDWARE</text>
+      <line x1="9" y1="31" x2="137" y2="31" stroke="rgba(255,255,255,0.3)" stroke-width="0.5"/>
+      <text x="14" y="46" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; MV12W Cameras ×3</text>
+      <text x="14" y="59" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; ICP Workshop</text>
+      <text x="14" y="72" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; ICP Demo Area</text>
+      <text x="14" y="85" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; ICP Pantry Area</text>
+      <text x="14" y="98" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; MT10 Env Sensor</text>
+      <text x="14" y="111" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; MS355 Network Switch</text>
+      <text x="14" y="124" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; MX105 Security Gateway</text>
+
+      <!-- Arrow 1 -->
+      <line x1="142" y1="104" x2="170" y2="104" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- Node 2: Meraki Cloud API -->
+      <rect x="172" y="8" width="126" height="192" rx="7" fill="#0c2340"/>
+      <text x="235" y="25" text-anchor="middle" font-size="8.5" font-weight="700" fill="white" font-family="Arial,sans-serif">MERAKI CLOUD API</text>
+      <line x1="177" y1="31" x2="293" y2="31" stroke="rgba(255,255,255,0.3)" stroke-width="0.5"/>
+      <text x="182" y="46" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Zone analytics history</text>
+      <text x="182" y="59" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; People count / occupancy</text>
+      <text x="182" y="72" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; 24h per-min history (2×12h)</text>
+      <text x="182" y="85" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Temperature &amp; humidity</text>
+      <text x="182" y="98" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Switch port telemetry</text>
+      <text x="182" y="111" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Client count &amp; PoE data</text>
+
+      <!-- Arrow 2 -->
+      <line x1="298" y1="104" x2="326" y2="104" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- Node 3: ICP Agent -->
+      <rect x="328" y="8" width="138" height="192" rx="7" fill="#1b4332"/>
+      <text x="397" y="23" text-anchor="middle" font-size="8.5" font-weight="700" fill="white" font-family="Arial,sans-serif">ICP OBSERVABILITY</text>
+      <text x="397" y="35" text-anchor="middle" font-size="8.5" font-weight="700" fill="white" font-family="Arial,sans-serif">AGENT (Python)</text>
+      <line x1="333" y1="41" x2="461" y2="41" stroke="rgba(255,255,255,0.3)" stroke-width="0.5"/>
+      <text x="338" y="56" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Poll Meraki API (2 min)</text>
+      <text x="338" y="69" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Push events to Splunk HEC</text>
+      <text x="338" y="82" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Query Splunk AI results</text>
+      <text x="338" y="95" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; LLM narrative engine</text>
+      <text x="338" y="108" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; FastAPI chatbot UI</text>
+      <text x="338" y="121" font-size="7" fill="#86efac" font-family="Arial,sans-serif">&#x25B8; Auto-response engine &#x26A1;</text>
+      <text x="338" y="134" font-size="7" fill="#fcd34d" font-family="Arial,sans-serif">&#x25B8; Camera AI 24h ML &#x25C6;</text>
+      <text x="338" y="147" font-size="7" fill="#fcd34d" font-family="Arial,sans-serif">&#x25B8; Cross-signal correlation</text>
+
+      <!-- Arrow 3a: Agent to Splunk -->
+      <line x1="466" y1="72" x2="504" y2="54" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- Arrow 3b: Agent to OpenRouter -->
+      <line x1="466" y1="155" x2="504" y2="168" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- Node 4: Splunk Enterprise + Splunk AI -->
+      <rect x="506" y="8" width="130" height="118" rx="7" fill="#c44b0b"/>
+      <text x="571" y="24" text-anchor="middle" font-size="8.5" font-weight="700" fill="white" font-family="Arial,sans-serif">SPLUNK ENTERPRISE</text>
+      <text x="571" y="36" text-anchor="middle" font-size="7" font-weight="600" fill="#ffd0b0" font-family="Arial,sans-serif">+ Splunk AI (MLTK)</text>
+      <line x1="511" y1="41" x2="631" y2="41" stroke="rgba(255,255,255,0.3)" stroke-width="0.5"/>
+      <text x="515" y="54" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; HEC structured events</text>
+      <text x="515" y="65" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; anomalydetection (SPL)</text>
+      <text x="515" y="76" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; predict / LLP5 forecast</text>
+      <text x="515" y="87" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Real-time SPL dashboards</text>
+      <text x="515" y="98" font-size="7" fill="#86efac" font-family="Arial,sans-serif">&#x25B8; icp:automated_response &#x26A1;</text>
+      <text x="515" y="109" font-size="7" fill="#86efac" font-family="Arial,sans-serif">&#x25B8; Saved Alerts (REST API) &#x26A1;</text>
+
+      <!-- Node 5: OpenRouter LLMs -->
+      <rect x="506" y="138" width="130" height="62" rx="7" fill="#4a1d96"/>
+      <text x="571" y="154" text-anchor="middle" font-size="8.5" font-weight="700" fill="white" font-family="Arial,sans-serif">OPENROUTER LLMs</text>
+      <line x1="511" y1="159" x2="631" y2="159" stroke="rgba(255,255,255,0.3)" stroke-width="0.5"/>
+      <text x="515" y="172" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; GPT-4o mini (analyst)</text>
+      <text x="515" y="183" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Llama 3.3 70B (chat)</text>
+      <text x="515" y="194" font-size="7" fill="rgba(255,255,255,0.92)" font-family="Arial,sans-serif">&#x25B8; Gemini Flash 2.0 (fallback)</text>
+
+      <!-- Arrow 4: Splunk to Dashboard -->
+      <line x1="636" y1="38" x2="671" y2="28" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- Arrow Splunk to Auto-Response output -->
+      <line x1="636" y1="82" x2="671" y2="78" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- Arrow 5: OpenRouter to AI Chat -->
+      <line x1="636" y1="172" x2="671" y2="155" stroke="#999" stroke-width="1.5" marker-end="url(#ah)"/>
+
+      <!-- Output 1: Dashboard -->
+      <rect x="673" y="14" width="84" height="32" rx="6" fill="#fff3ee" stroke="#c44b0b" stroke-width="1.5"/>
+      <text x="715" y="29" text-anchor="middle" font-size="8.5" font-weight="700" fill="#c44b0b" font-family="Arial,sans-serif">&#x2460; DASHBOARD</text>
+      <text x="715" y="40" text-anchor="middle" font-size="6" fill="#a0522d" font-family="Arial,sans-serif">Real-time SPL panels</text>
+
+      <!-- Output 2: Auto-Response -->
+      <rect x="673" y="58" width="84" height="44" rx="6" fill="#f0fdf4" stroke="#22c55e" stroke-width="1.5"/>
+      <text x="715" y="73" text-anchor="middle" font-size="8" font-weight="700" fill="#166534" font-family="Arial,sans-serif">&#x26A1; AUTO-RESPONSE</text>
+      <text x="715" y="84" text-anchor="middle" font-size="6" fill="#166534" font-family="Arial,sans-serif">LLM incident report</text>
+      <text x="715" y="94" text-anchor="middle" font-size="6" fill="#166534" font-family="Arial,sans-serif">Splunk Saved Alerts</text>
+
+      <!-- Output 3: AI Chat App -->
+      <rect x="673" y="115" width="84" height="42" rx="6" fill="#f3f0ff" stroke="#4a1d96" stroke-width="1.5"/>
+      <text x="715" y="131" text-anchor="middle" font-size="8.5" font-weight="700" fill="#4a1d96" font-family="Arial,sans-serif">&#x2461; AI CHAT APP</text>
+      <text x="715" y="142" text-anchor="middle" font-size="6" fill="#5b21b6" font-family="Arial,sans-serif">Natural language Q&amp;A</text>
+      <text x="715" y="152" text-anchor="middle" font-size="6" fill="#5b21b6" font-family="Arial,sans-serif">Splunk AI cited in responses</text>
+
+      <!-- Closed-loop strip 1: Splunk AI -->
+      <rect x="4" y="204" width="752" height="20" rx="4" fill="#0d1117" stroke="#30363d" stroke-width="0.7"/>
+      <text x="12" y="217" font-size="6.5" font-family="Arial,sans-serif">
+        <tspan font-weight="700" fill="#60a5fa">SPLUNK AI LOOP</tspan>
+        <tspan fill="#93c5fd" dx="4">&#x25B8; anomalydetection + predict/LLP5 results queried back &#x25B8; injected into every LLM prompt as grounded context &#x25B8; auto-response logged back to Splunk</tspan>
+      </text>
+
+      <!-- Closed-loop strip 2: Camera AI (amber) -->
+      <rect x="4" y="226" width="752" height="20" rx="4" fill="#1c1407" stroke="#78350f" stroke-width="0.7"/>
+      <text x="12" y="239" font-size="6.5" font-family="Arial,sans-serif">
+        <tspan font-weight="700" fill="#fbbf24">CAMERA AI LOOP &#x25C6;</tspan>
+        <tspan fill="#fde68a" dx="4">&#x25B8; 24h per-min occupancy fetched every 10 min &#x25B8; crowd surge + thermal cross-signal detected in-process &#x25B8; amber markers on Chart.js timelines &#x25B8; icp:camera_ml_anomaly → Splunk</tspan>
+      </text>
+    </svg>
+  </div>
+
+  <!-- ── DATA PAYLOAD STRIP ──────────────────────────── -->
+  <div class="data-strip">
+    <strong>Live data per cycle:</strong>
+    <span>People count by zone</span>
+    <span>Temperature &amp; humidity</span>
+    <span>Network clients &amp; PoE</span>
+    <span>24h occupancy timelines + AI anomaly markers</span>
+    <span>Splunk AI anomaly flags</span>
+    <span>MLTK temperature forecast</span>
+    <span>icp:automated_response events</span>
+    <span>Splunk Saved Alerts (auto-created)</span>
+  </div>
+
+  <!-- ── DELIVERABLES ────────────────────────────────── -->
+  <div class="deliverables">
+    <div class="card card-splunk">
+      <div class="card-header">
+        <div class="card-num">1</div>
+        <div>
+          <div class="card-title">Splunk Real-Time Dashboard</div>
+          <div class="card-sub">Operational visibility across the ICP space</div>
+        </div>
+      </div>
+      <ul>
+        <li>Live zone occupancy from three MV cameras: ICP Workshop, Demo Area, and Pantry</li>
+        <li>Environmental conditions panel — temperature &amp; humidity from MT sensors</li>
+        <li>Network activity view — connected device count and switch telemetry</li>
+        <li>All data delivered via Splunk HEC as structured JSON events (no agents, no forwarders)</li>
+        <li>Splunk AI (MLTK) runs <em>anomalydetection</em> and <em>predict/LLP5</em> — results fed back into LLM context</li>
+        <li>Immediately deployable on any Splunk Enterprise instance</li>
+      </ul>
+    </div>
+
+    <div class="card card-ai">
+      <div class="card-header">
+        <div class="card-num">2</div>
+        <div>
+          <div class="card-title">Agentic AI Observability + Camera AI Triage</div>
+          <div class="card-sub">Three detection layers: Splunk MLTK · Camera AI (24h ML) · Cross-signal correlation</div>
+        </div>
+      </div>
+      <ul>
+        <li><strong>Camera AI (24h)</strong> — fetches 1,440 per-minute occupancy points per camera; detects crowd surges (3× hourly baseline); renders amber ◆ anomaly markers on interactive Chart.js timelines with hover detail</li>
+        <li><strong>Cross-signal anomalies</strong> — temperature or humidity spike with zero camera occupancy flags potential equipment overheating; overcrowding (&gt;5 persons) and after-hours presence (6 PM–7 AM) raise severity alerts</li>
+        <li><strong>Automated AI Response Engine</strong> — on any anomaly: LLM auto-generates incident report, creates Splunk saved alert via REST API, logs <em>icp:automated_response</em> and <em>icp:camera_ml_anomaly</em> back to Splunk</li>
+        <li>Natural language chat grounded in live Splunk AI + Camera AI findings</li>
+        <li>Live in-app LLM switching — GPT-4o mini · Llama 3.3 70B · Gemini Flash 2.0</li>
+        <li>One-click [Clear] controls on anomaly and automated response panels</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- ── FOOTER ──────────────────────────────────────── -->
+  <footer>
+    <div>
+      <div class="footer-org"><span>Innovation Central Perth</span> &nbsp;·&nbsp; Curtin University &nbsp;·&nbsp; Perth WA</div>
+      <div class="footer-desc">Smart Campus Infrastructure — Live Production Deployment &nbsp;·&nbsp; stanley.chong@curtin.edu.au</div>
+    </div>
+    <div class="tech-stack">
+      <span class="pill">Cisco Meraki MV</span>
+      <span class="pill">Meraki MT Sensors</span>
+      <span class="pill">Meraki MS Switches</span>
+      <span class="pill">Splunk Enterprise</span>
+      <span class="pill">Splunk MLTK AI</span>
+      <span class="pill">Splunk HEC</span>
+      <span class="pill pill-amber">Camera AI (24h ML)</span>
+      <span class="pill pill-amber">Chart.js Timelines</span>
+      <span class="pill">OpenRouter</span>
+      <span class="pill">Python 3</span>
+      <span class="pill">OpenAI GPT-4o mini</span>
+      <span class="pill">Meta Llama 3.3</span>
+      <span class="pill">Google Gemini Flash</span>
+    </div>
+  </footer>
+
+</body>
+</html>

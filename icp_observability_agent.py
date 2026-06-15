@@ -52,6 +52,7 @@ from fastapi.responses import HTMLResponse, FileResponse
 from pydantic import BaseModel
 import uvicorn
 from dotenv import load_dotenv
+from camera_ml import OccupancyAnalyser
 
 # ── Suppress SSL warnings for local Splunk HEC ──────────────────────────────
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -106,18 +107,29 @@ SWITCH = {
 
 # Full Frame only for all cameras — named area zones use a different API endpoint
 CAMERAS = [
-    {"serial": "Q2GV-52D5-YTLK", "name": "Coffee/Microwave Area",
+    {"serial": "Q2GV-52D5-YTLK", "name": "ICP Pantry Area",
      "mac": "34:56:fe:a3:a7:c7",
      "zones": [{"id": "0", "label": "Full Frame"}]},
-    {"serial": "Q2GV-MGCS-QRM5", "name": "ICP Bookshelf",
+    {"serial": "Q2GV-MGCS-QRM5", "name": "ICP Demo Area",
      "mac": "34:56:fe:a3:a7:d6",
      "zones": [{"id": "0", "label": "Full Frame"}]},
-    {"serial": "Q2GV-XPS8-82TX", "name": "DEMO CAM",
+    {"serial": "Q2GV-XPS8-82TX", "name": "ICP Workshop",
      "mac": "34:56:fe:a3:a7:cd",
      "zones": [{"id": "0", "label": "Full Frame"}]},
 ]
 
 MT10_SERIAL = "Q3CA-7SBV-ZCTA"
+
+# ── Anomaly thresholds ────────────────────────────────────────────────────────
+OVERCROWD_THRESHOLD  = 5      # persons — MEDIUM flag above this
+AFTER_HOURS_START    = 18     # 6 PM — any occupancy after this is flagged
+AFTER_HOURS_END      = 7      # 7 AM — until this hour
+THERMAL_SPIKE_DELTA  = 2.0    # °C rise over last 5 polls with zero occupancy → EQUIPMENT_THERMAL
+THERMAL_ABS_NO_OCC   = 26.0   # absolute °C threshold when nobody is present
+HUMIDITY_ABS_NO_OCC  = 65.0   # % RH threshold when nobody is present
+
+# ── Camera ML analyser (shared across polling threads) ───────────────────────
+analyser = OccupancyAnalyser()
 
 # ── In-memory state ──────────────────────────────────────────────────────────
 state = {
@@ -133,6 +145,10 @@ state = {
     "anomalies":            [],
     "splunk_ai_insights":   {},
     "automated_responses":  [],
+    "camera_history":         {},
+    "camera_history_fetched": None,
+    "temp_history":    [],    # rolling last 10 readings [{ts, value}]
+    "hum_history":     [],    # rolling last 10 readings [{ts, value}]
     "poll_count":     0,
     "errors":         [],
 }
@@ -507,12 +523,16 @@ def poll_sensors():
                     event["value"] = val
                     if serial == MT10_SERIAL:
                         state["temperature"] = val
+                        state["temp_history"].append(val)
+                        state["temp_history"] = state["temp_history"][-10:]
                 elif metric == "humidity":
                     val = reading["humidity"]["relativePercentage"]
                     event["humidity_pct"] = val
                     event["value"] = val
                     if serial == MT10_SERIAL:
                         state["humidity"] = val
+                        state["hum_history"].append(val)
+                        state["hum_history"] = state["hum_history"][-10:]
                 elif metric == "door":
                     val = reading["door"]["open"]
                     event["door_open"] = val
@@ -630,6 +650,83 @@ def poll_cameras():
                     f"Camera {cam['name']} zone {zone['label']}: {e}")
     return total
 
+# ── Poll: 24-hour camera history + ML analysis ───────────────────────────────
+def poll_camera_history_24h():
+    """
+    Fetch full 24h zone history (2×12h API calls) for every camera in parallel,
+    run the ML anomaly engine, send anomalies to Splunk, and cache results.
+    Runs in its own daemon thread every 10 minutes.
+    """
+    now = int(datetime.now(timezone.utc).timestamp())
+    mid = now - 43200   # 12 h ago
+    t0  = now - 86400   # 24 h ago
+
+    def _fetch_one(cam):
+        zone_id = cam["zones"][0]["id"]
+        try:
+            p1 = meraki_get(
+                f"/devices/{cam['serial']}/camera/analytics/zones/{zone_id}/history",
+                params={"t0": t0, "t1": mid},
+            ) or []
+            p2 = meraki_get(
+                f"/devices/{cam['serial']}/camera/analytics/zones/{zone_id}/history",
+                params={"t0": mid, "t1": now},
+            ) or []
+            return cam["name"], p1 + p2, None
+        except Exception as exc:
+            return cam["name"], [], exc
+
+    cam_data = {}
+    with ThreadPoolExecutor(max_workers=len(CAMERAS)) as ex:
+        futures = {ex.submit(_fetch_one, cam): cam for cam in CAMERAS}
+        for fut in as_completed(futures):
+            name, buckets, err = fut.result()
+            if err:
+                state["errors"].append(f"Camera 24h {name}: {err}")
+                continue
+
+            anomalies = analyser.ingest(name, buckets)
+            stats     = analyser.get_stats(name)
+            forecast  = analyser.forecast_next(name)
+            chart     = analyser.export_for_chart(name)
+
+            cam_data[name] = {
+                "chart":     chart,
+                "stats":     stats,
+                "anomalies": anomalies,
+                "forecast":  forecast,
+            }
+
+            if anomalies:
+                send_to_splunk([{
+                    "camera_name":  name,
+                    "anomaly_type": a["type"],
+                    "severity":     a["severity"],
+                    "message":      a["message"],
+                    "value":        a["value"],
+                    "bucket_time":  a["time"],
+                } for a in anomalies[:10]], "icp:camera_ml_anomaly")
+
+    state["camera_history"]         = cam_data
+    state["camera_history_fetched"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    total_anoms = sum(len(d.get("anomalies", [])) for d in cam_data.values())
+    print(f"[CamHistory] Updated — {len(cam_data)} cameras, {total_anoms} ML anomalies detected")
+    return cam_data
+
+
+def camera_history_loop():
+    """Daemon thread: refresh 24h camera ML analytics every 10 minutes."""
+    print("[CamHistory] Starting — interval 600s")
+    import time as _t
+    _t.sleep(8)     # let main poller start first
+    while True:
+        try:
+            poll_camera_history_24h()
+        except Exception as e:
+            state["errors"].append(f"Camera history loop: {e}")
+        _t.sleep(600)
+
+
 # ── Anomaly detection ────────────────────────────────────────────────────────
 def detect_anomalies():
     anomalies = []
@@ -685,6 +782,98 @@ def detect_anomalies():
             "severity": "MEDIUM",
         })
 
+    # ── Cross-signal: thermal spike with zero camera occupancy ──────────────────
+    total_occ = sum(
+        v.get("count", 0) for v in state["people_count"].values()
+        if not v.get("initialising")
+    )
+    temp_hist = state.get("temp_history", [])
+    hum_hist  = state.get("hum_history",  [])
+
+    if total_occ == 0 and temp is not None:
+        # Rate-of-change spike: rose ≥ THERMAL_SPIKE_DELTA over last 5 readings
+        if len(temp_hist) >= 3:
+            temp_rise = temp - min(temp_hist[-5:])
+            if temp_rise >= THERMAL_SPIKE_DELTA:
+                anomalies.append({
+                    "type":      "EQUIPMENT_THERMAL",
+                    "signal":    "temp_no_occupancy",
+                    "value":     temp,
+                    "message":   (f"Temperature rose {temp_rise:.1f}°C with zero camera "
+                                  f"occupancy — possible equipment overheating ({temp:.1f}°C)"),
+                    "severity":  "HIGH",
+                })
+        # Absolute threshold breach with nobody present
+        if temp > THERMAL_ABS_NO_OCC:
+            anomalies.append({
+                "type":      "EQUIPMENT_THERMAL",
+                "signal":    "temp_no_occupancy",
+                "value":     temp,
+                "message":   (f"Temperature {temp:.1f}°C with zero camera occupancy "
+                              f"— no human heat source, check equipment"),
+                "severity":  "MEDIUM",
+            })
+
+    if total_occ == 0 and hum is not None and hum > HUMIDITY_ABS_NO_OCC:
+        if len(hum_hist) >= 2:
+            hum_rise = hum - min(hum_hist[-5:])
+            severity = "HIGH" if hum_rise >= 5.0 else "MEDIUM"
+            anomalies.append({
+                "type":      "EQUIPMENT_THERMAL",
+                "signal":    "humidity_no_occupancy",
+                "value":     hum,
+                "message":   (f"Humidity {hum:.0f}% with zero camera occupancy "
+                              f"(+{hum_rise:.0f}% recent rise) — possible moisture/HVAC issue"),
+                "severity":  severity,
+            })
+
+    # ── Occupancy: overcrowding and after-hours presence ─────────────────────
+    current_hour = datetime.now().hour
+    after_hours  = current_hour >= AFTER_HOURS_START or current_hour < AFTER_HOURS_END
+
+    for cam_val in state["people_count"].values():
+        if cam_val.get("initialising"):
+            continue
+        count    = cam_val.get("count", 0.0)
+        cam_name = cam_val.get("camera", "unknown")
+
+        if count > OVERCROWD_THRESHOLD:
+            anomalies.append({
+                "type":     "OVERCROWDING",
+                "signal":   "camera_occupancy",
+                "value":    round(count, 1),
+                "message":  (f"{cam_name}: {count:.0f} persons — "
+                             f"overcrowding threshold ({OVERCROWD_THRESHOLD}) exceeded"),
+                "severity": "MEDIUM",
+                "camera":   cam_name,
+            })
+
+        if count > 0 and after_hours:
+            anomalies.append({
+                "type":     "AFTER_HOURS_PRESENCE",
+                "signal":   "camera_occupancy",
+                "value":    round(count, 1),
+                "message":  (f"{cam_name}: {count:.0f} person(s) detected "
+                             f"after hours ({current_hour:02d}:00)"),
+                "severity": "HIGH",
+                "camera":   cam_name,
+            })
+
+    # Camera ML anomalies — HIGH/MEDIUM only (LOW visible via /api/camera/history)
+    for cam_name, cd in state.get("camera_history", {}).items():
+        for anom in cd.get("anomalies", []):
+            sev = anom.get("severity", "LOW")
+            if sev not in ("HIGH", "MEDIUM"):
+                continue
+            anomalies.append({
+                "type":     f"CAMERA_ML_{anom['type']}",
+                "signal":   "camera_occupancy",
+                "value":    round(anom.get("value", 0), 1),
+                "message":  anom.get("message", ""),
+                "severity": sev,
+                "camera":   cam_name,
+            })
+
     state["anomalies"] = anomalies
     if anomalies:
         send_to_splunk(anomalies, "icp:anomaly")
@@ -728,6 +917,32 @@ def build_context() -> str:
             f"  Port {pid} ({name}): {traffic:.1f} Kbps{client_str}, PoE {poe:.1f} Wh")
     port_summary = "\n".join(port_lines) if port_lines else "  No active ports"
 
+    # Camera ML 24h baseline
+    cam_ml_lines = []
+    for cam_name, cd in state.get("camera_history", {}).items():
+        stats = cd.get("stats", {})
+        if not stats:
+            continue
+        fc = cd.get("forecast")
+        n  = stats.get("anomaly_count", 0)
+        line = (
+            f"  {cam_name}: "
+            f"peak {stats.get('peak_occupancy', 0):.1f} ppl "
+            f"@ {stats.get('peak_time', 'N/A')}, "
+            f"{stats.get('total_entrances', 0)} entrances/24h, "
+            f"{n} ML anomal{'ies' if n != 1 else 'y'}"
+        )
+        if fc:
+            line += f", trend {fc['trend']} (→{fc['next_occ']:.1f} ppl)"
+        cam_ml_lines.append(line)
+    fetched = state.get("camera_history_fetched")
+    if cam_ml_lines:
+        cam_ml_summary = "\n".join(cam_ml_lines)
+        if fetched:
+            cam_ml_summary += f"\n  (Updated: {fetched})"
+    else:
+        cam_ml_summary = "  Pending first 24h fetch (runs ~8s after startup)..."
+
     # Splunk AI section
     ai = state.get("splunk_ai_insights", {})
     if ai.get("available"):
@@ -757,8 +972,8 @@ def build_context() -> str:
 Location: Curtin University, Bentley WA
 
 ENVIRONMENTAL (ICP CRUX - MT10):
-  Temperature : {f"{temp:.1f}°C" if temp is not None else "N/A"} (threshold: 24°C)
-  Humidity    : {f"{hum:.0f}%" if hum is not None else "N/A"} (threshold: 70%)
+  Temperature : {f"{temp:.1f}°C" if temp is not None else "N/A"} (alert: 24°C occupied / {THERMAL_ABS_NO_OCC}°C unoccupied)
+  Humidity    : {f"{hum:.0f}%" if hum is not None else "N/A"} (alert: 70% occupied / {HUMIDITY_ABS_NO_OCC}% unoccupied)
   Side Door   : {"OPEN" if door else "CLOSED" if door is not None else "N/A"}
 
 NETWORK (ICP-SW01 MS355-48X2):
@@ -774,6 +989,9 @@ CAMERA ANALYTICS (MV12W):
 
 ANOMALIES DETECTED:
 {anom_summary}
+
+CAMERA ML ANALYTICS (24h baseline · Z-score · surge · dead-zone · trend):
+{cam_ml_summary}
 
 SPLUNK AI INSIGHTS (anomalydetection · predict/LLP5):
 {splunk_ai_section}
@@ -811,14 +1029,19 @@ Your role:
 - Flag anomalies with actionable recommendations
 - Keep responses focused and technical but accessible
 
-CRITICAL: Your responses MUST explicitly reference the SPLUNK AI INSIGHTS section.
-Always cite Splunk AI findings using phrases such as:
+CRITICAL: Your responses MUST reference BOTH the SPLUNK AI INSIGHTS and CAMERA ML ANALYTICS sections.
+Cite Splunk AI findings using phrases such as:
   "According to Splunk anomalydetection..."
   "Splunk predict/LLP5 forecasts..."
   "Splunk AI has identified..."
   "Splunk MLTK analysis shows..."
 This makes the Splunk AI contribution to your analysis clearly visible.
 If Splunk AI shows no outliers, explicitly state that — e.g. "Splunk anomalydetection confirms all signals are within statistical norms."
+Cite Camera ML using phrases such as:
+  "Camera ML baseline analysis shows..."
+  "The 24h occupancy trend indicates..."
+  "ML anomaly detection flagged a crowd surge at..."
+  "Peak occupancy for this camera was..."
 
 When answering questions, always ground your response in the actual data provided.
 If values are within normal ranges, say so clearly. Be specific with numbers."""
@@ -998,6 +1221,33 @@ async def get_responses():
     """Return the automated AI responses triggered by Splunk AI anomaly detection."""
     return {"automated_responses": state["automated_responses"]}
 
+@app.post("/api/clear/anomalies")
+async def clear_anomalies():
+    state["anomalies"] = []
+    return {"ok": True}
+
+@app.post("/api/clear/responses")
+async def clear_responses():
+    state["automated_responses"] = []
+    return {"ok": True}
+
+@app.get("/api/camera/history")
+async def get_camera_history():
+    """Return 24h camera time-series with ML anomaly flags for Chart.js rendering."""
+    cam_out = {}
+    for cam_name, cd in state.get("camera_history", {}).items():
+        cam_out[cam_name] = {
+            "chart":     cd.get("chart", {}),
+            "stats":     cd.get("stats", {}),
+            "forecast":  cd.get("forecast"),
+            "anomalies": cd.get("anomalies", []),
+        }
+    return {
+        "cameras": cam_out,
+        "fetched": state.get("camera_history_fetched"),
+    }
+
+
 @app.get("/api/narrative")
 async def get_narrative():
     ctx = build_context()
@@ -1086,6 +1336,20 @@ HTML_UI = """<!DOCTYPE html>
   .auto-resp .badge { font-size:10px; }
   .auto-resp .badge.ok   { color:#3fb950; }
   .auto-resp .badge.fail { color:#f85149; }
+  .cam-btn { background:#0d1117; border:1px solid #30363d; border-radius:12px;
+             padding:4px 10px; font-size:11px; cursor:pointer; color:#8b949e;
+             margin-bottom:4px; }
+  .cam-btn:hover { border-color:#a371f7; color:#a371f7; }
+  #cam-chart-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.78);
+                     z-index:1001; align-items:center; justify-content:center; }
+  .cam-ml-item { background:#0d1117; border-left:3px solid #a371f7; border-radius:4px;
+                 padding:8px 10px; margin-bottom:6px; font-size:12px; }
+  .cam-ml-item .sev { font-size:10px; font-weight:700; color:#a371f7; margin-bottom:3px; }
+  .section-hdr { display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; }
+  .section-hdr h2 { margin-bottom:0; }
+  .clear-btn { background:none; border:1px solid #30363d; border-radius:6px; color:#6e7681;
+               font-size:10px; padding:2px 8px; cursor:pointer; line-height:1.4; }
+  .clear-btn:hover { border-color:#f85149; color:#f85149; }
 </style>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
@@ -1129,24 +1393,27 @@ HTML_UI = """<!DOCTYPE html>
       </div>
     </div>
 
-    <h2>People Count</h2>
-    <div id="people-counts" class="anomaly-list" style="margin-bottom:16px">
-      <div class="anomaly INFO"><div class="sev">CAMERA</div>Awaiting data...</div>
+    <h2 style="color:#a371f7">&#x1F4CA; Camera AI (24h)</h2>
+    <div id="camera-ml-list" class="anomaly-list">
+      <div class="cam-ml-item"><div class="sev">CAMERA ML</div>Fetching 24h baseline...</div>
     </div>
+    <h2>24h Timeline</h2>
+    <div id="cam-timeline-btns" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px"></div>
 
-    <h2>Active Anomalies</h2>
+    <div class="section-hdr">
+      <h2>Active Anomalies</h2>
+      <button class="clear-btn" onclick="clearAnomalies()">[Clear]</button>
+    </div>
     <div id="anomaly-list" class="anomaly-list">
       <div class="anomaly INFO"><div class="sev">STATUS</div>Polling...</div>
     </div>
 
-    <h2>Splunk AI Insights</h2>
-    <div id="splunk-ai-list" class="anomaly-list">
-      <div class="anomaly" style="border-left-color:#f97316"><div class="sev">SPLUNK AI</div>Awaiting first analysis...</div>
+    <div class="section-hdr">
+      <h2 style="color:#a371f7">&#x26A1; Automated Responses</h2>
+      <button class="clear-btn" onclick="clearResponses()">[Clear]</button>
     </div>
-
-    <h2 style="color:#a371f7">&#x26A1; Automated Responses</h2>
     <div id="auto-response-list" class="anomaly-list">
-      <div class="auto-resp"><div class="sev">AUTO-RESPONSE ENGINE</div><div class="body">Monitoring Splunk AI — will fire on anomaly detection</div></div>
+      <div class="auto-resp"><div class="sev">AUTO-RESPONSE ENGINE</div><div class="body">Monitoring — will fire on anomaly detection</div></div>
     </div>
   </div>
 
@@ -1181,6 +1448,18 @@ HTML_UI = """<!DOCTYPE html>
     </div>
     <div class="chart-wrap"><canvas id="chart-canvas"></canvas></div>
     <div class="modal-foot">Up to 12 hours of history &nbsp;·&nbsp; updates every 2 min &nbsp;·&nbsp; click outside to close</div>
+  </div>
+</div>
+
+<div id="cam-chart-modal" onclick="if(event.target===this)closeCamChart()">
+  <div class="modal-card">
+    <div class="modal-hdr">
+      <span id="cam-modal-title"></span>
+      <button onclick="closeCamChart()">&#x2715;</button>
+    </div>
+    <div style="font-size:11px;color:#8b949e;margin-bottom:8px;padding:0 2px" id="cam-modal-stats"></div>
+    <div class="chart-wrap" style="height:290px"><canvas id="cam-chart-canvas"></canvas></div>
+    <div class="modal-foot">24h occupancy &nbsp;·&nbsp; ◆ amber diamond = ML anomaly (hover for detail) &nbsp;·&nbsp; right axis = avg occupancy</div>
   </div>
 </div>
 
@@ -1308,26 +1587,6 @@ async function updateStatus() {
 
     histPush(d);
 
-    // People counts — show initialising state
-    const pc = document.getElementById('people-counts');
-    const people = d.people_count;
-    if (people && Object.keys(people).length > 0) {
-      pc.innerHTML = Object.entries(people).map(([k,v]) => {
-        if (v.initialising) {
-          return `<div class="anomaly INIT">
-            <div class="sev">${v.camera.toUpperCase()} / ${v.zone}</div>
-            ⏳ MV Sense initialising — data arriving soon
-          </div>`;
-        }
-        return `<div class="anomaly INFO">
-          <div class="sev">${v.camera.toUpperCase()} / ${v.zone}</div>
-          ${v.count.toFixed(1)} avg occupancy &nbsp;|&nbsp; ${v.entrances} entrances
-        </div>`;
-      }).join('');
-    } else {
-      pc.innerHTML = '<div class="anomaly INFO"><div class="sev">CAMERA</div>No data yet</div>';
-    }
-
     // Anomalies
     const al = document.getElementById('anomaly-list');
     if (d.anomalies && d.anomalies.length > 0) {
@@ -1338,27 +1597,6 @@ async function updateStatus() {
         </div>`).join('');
     } else {
       al.innerHTML = '<div class="anomaly INFO"><div class="sev">STATUS</div>All systems normal</div>';
-    }
-
-    // Splunk AI insights
-    const sai = document.getElementById('splunk-ai-list');
-    const ai  = d.splunk_ai_insights || {};
-    if (!ai.available && ai.reason) {
-      sai.innerHTML = `<div class="anomaly" style="border-left-color:#f97316">
-        <div class="sev">SPLUNK AI</div>Not configured: ${ai.reason}</div>`;
-    } else if (ai.available) {
-      const lines = ai.summary || [];
-      const fc    = ai.temp_forecast;
-      let html = lines.map(l =>
-        `<div class="anomaly" style="border-left-color:#f97316">
-           <div class="sev">SPLUNK AI</div>${l}</div>`).join('');
-      if (fc) {
-        html += `<div class="anomaly" style="border-left-color:#38bdf8">
-          <div class="sev">MLTK FORECAST</div>
-          Temp ~${parseFloat(fc.value||0).toFixed(1)}°C in 30 min
-          (95% CI ${fc.lower95||'?'}–${fc.upper95||'?'}°C)</div>`;
-      }
-      sai.innerHTML = html || '<div class="anomaly" style="border-left-color:#f97316"><div class="sev">SPLUNK AI</div>No outliers detected</div>';
     }
 
     document.getElementById('poll-status').innerHTML =
@@ -1439,11 +1677,226 @@ async function fetchResponses() {
   } catch(e) { console.error('Responses fetch failed:', e); }
 }
 
+// ── Camera ML: 24h timeline + anomaly panel ──────────────────────────────────
+let camHistory = {};
+let camChartObj = null;
+
+async function loadCameraHistory() {
+  try {
+    const r = await fetch('/api/camera/history');
+    if (!r.ok) return;
+    const d = await r.json();
+    camHistory = d.cameras || {};
+    renderCameraML(d);
+    renderCamButtons();
+  } catch(e) { console.warn('Camera history fetch failed:', e); }
+}
+
+function renderCamButtons() {
+  const el = document.getElementById('cam-timeline-btns');
+  if (!el) return;
+  el.innerHTML = Object.keys(camHistory).map(name => {
+    const safe = name.replace(/'/g, "\\'");
+    return `<button class="cam-btn" onclick="openCamChart('${safe}')">&#x1F4F9; ${name}</button>`;
+  }).join('');
+}
+
+function renderCameraML(d) {
+  const el = document.getElementById('camera-ml-list');
+  if (!el) return;
+  const cams = d.cameras || {};
+  const lines = [];
+  for (const [name, cd] of Object.entries(cams)) {
+    const stats  = cd.stats    || {};
+    const fc     = cd.forecast || null;
+    const anoms  = cd.anomalies || [];
+    const high   = anoms.filter(a => a.severity === 'HIGH' || a.severity === 'MEDIUM');
+    const peakOcc = (stats.peak_occupancy || 0).toFixed(1);
+    const peakT   = stats.peak_time || 'N/A';
+    const totEnt  = stats.total_entrances || 0;
+    let body = `Peak <b>${peakOcc} ppl</b> @ ${peakT} &nbsp;·&nbsp; ${totEnt} entrances`;
+    if (fc) body += ` &nbsp;·&nbsp; ${fc.trend} trend (→${fc.next_occ} ppl)`;
+    if (high.length) body += `<br><span style="color:#f85149">&#x26A0; ${high.length} ML anomal${high.length===1?'y':'ies'}: ${high[0].message.substring(0,60)}…</span>`;
+    lines.push(`<div class="cam-ml-item">
+      <div class="sev">&#x1F4CA; ${name.toUpperCase()}</div>${body}</div>`);
+  }
+  const fetched = d.fetched ? `<div style="font-size:10px;color:#6e7681;margin-top:4px">Updated: ${d.fetched}</div>` : '';
+  el.innerHTML = (lines.join('') || '<div class="cam-ml-item"><div class="sev">CAMERA ML</div>No data yet</div>') + fetched;
+}
+
+function openCamChart(name) {
+  const cd = camHistory[name];
+  if (!cd) { return; }
+  document.getElementById('cam-modal-title').textContent = name + ' — 24h Occupancy Timeline';
+  const stats = cd.stats || {};
+  const fc    = cd.forecast;
+  const an    = (cd.anomalies || []).length;
+  let info = `Peak: ${(stats.peak_occupancy||0).toFixed(1)} ppl @ ${stats.peak_time||'N/A'}  ·  `
+           + `Total entrances: ${stats.total_entrances||0}  ·  `
+           + `ML anomalies: ${an}`;
+  if (fc) info += `  ·  Trend: ${fc.trend} → next ~${fc.next_occ} ppl`;
+  document.getElementById('cam-modal-stats').textContent = info;
+  document.getElementById('cam-chart-modal').style.display = 'flex';
+
+  const ctx = document.getElementById('cam-chart-canvas').getContext('2d');
+  if (camChartObj) { camChartObj.destroy(); camChartObj = null; }
+
+  const chart   = cd.chart || {};
+  const labels  = chart.labels          || [];
+  const occ     = chart.occupancy       || [];
+  const ent     = chart.entrances       || [];
+  const markers = chart.anomaly_markers || [];
+
+  // Build time -> anomaly lookup for tooltip detail
+  const anomByTime = {};
+  markers.forEach(m => { anomByTime[m.time] = m; });
+
+  // Amber diamond dataset — only at anomaly positions, null elsewhere
+  const markerY  = labels.map(l => anomByTime[l] ? anomByTime[l].occ : null);
+  const markerBg = labels.map(l => {
+    if (!anomByTime[l]) return 'transparent';
+    return anomByTime[l].severity === 'HIGH'
+      ? 'rgba(255,130,20,0.95)'
+      : 'rgba(255,196,0,0.95)';
+  });
+
+  camChartObj = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        {
+          label: 'Entrances',
+          data: ent,
+          backgroundColor: 'rgba(88,166,255,0.45)',
+          borderWidth: 0,
+          yAxisID: 'y',
+          order: 3,
+        },
+        {
+          label: 'Avg Occupancy',
+          data: occ,
+          type: 'line',
+          borderColor: '#00bceb',
+          backgroundColor: 'rgba(0,188,235,0.08)',
+          fill: true,
+          tension: 0.3,
+          borderWidth: 2,
+          pointRadius: labels.length > 120 ? 0 : 2,
+          yAxisID: 'y1',
+          order: 2,
+        },
+        {
+          label: 'Anomaly',
+          type: 'line',
+          data: markerY,
+          pointBackgroundColor: markerBg,
+          pointBorderColor: '#fff',
+          pointBorderWidth: 2,
+          pointStyle: 'rectRot',
+          pointRadius: labels.map(l => anomByTime[l] ? 14 : 0),
+          pointHoverRadius: labels.map(l => anomByTime[l] ? 22 : 0),
+          pointHitRadius: labels.map(l => anomByTime[l] ? 40 : 0),
+          showLine: false,
+          spanGaps: false,
+          yAxisID: 'y1',
+          order: 1,
+        }
+      ]
+    },
+    options: {
+      animation: false,
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          display: true,
+          labels: {
+            color: '#8b949e',
+            font: { size: 11 },
+            generateLabels: chart => {
+              const items = Chart.defaults.plugins.legend.labels.generateLabels(chart);
+              items.forEach(item => {
+                if (item.text === 'Anomaly') {
+                  item.fillStyle   = 'rgba(255,180,0,0.95)';
+                  item.strokeStyle = '#fff';
+                  item.pointStyle  = 'rectRot';
+                  item.text        = '◆ Anomaly marker';
+                }
+              });
+              return items;
+            }
+          }
+        },
+        tooltip: {
+          filter: item => item.datasetIndex !== 2,
+          callbacks: {
+            label: c => c.dataset.label + ': ' + (c.parsed.y !== null ? c.parsed.y.toFixed(1) : 'N/A'),
+            afterBody: items => {
+              const lbl = items[0]?.label;
+              if (!lbl) return [];
+              const idx = labels.indexOf(lbl);
+              if (idx < 0) return [];
+
+              // Proximity search — find nearest anomaly within ±30 labels (~30 min for 1-min data)
+              const PROX = 30;
+              let best = null, bestDist = Infinity;
+              markers.forEach(m => {
+                const mi = labels.indexOf(m.time);
+                if (mi < 0) return;
+                const dist = Math.abs(idx - mi);
+                if (dist <= PROX && dist < bestDist) { best = m; bestDist = dist; }
+              });
+              if (!best) return [];
+
+              const icon = best.severity === 'HIGH' ? '⚠️' : '⚡';
+              const type = best.type.replace(/_/g, ' ');
+              const msg  = best.message.length > 90 ? best.message.slice(0, 90) + '…' : best.message;
+              const dist = bestDist > 0 ? ` (nearest ±${bestDist} min)` : '';
+              return ['', `${icon} ${best.severity} · ${type}${dist}`, msg];
+            }
+          }
+        }
+      },
+      scales: {
+        x: { grid:{ color:'#21262d' },
+             ticks:{ color:'#8b949e', maxTicksLimit:12, maxRotation:0 } },
+        y: { type:'linear', position:'left', grid:{ color:'#21262d' },
+             ticks:{ color:'#58a6ff' },
+             title:{ display:true, text:'Entrances', color:'#58a6ff', font:{size:10} } },
+        y1:{ type:'linear', position:'right', grid:{ drawOnChartArea:false },
+             ticks:{ color:'#00bceb' },
+             title:{ display:true, text:'Avg Occ', color:'#00bceb', font:{size:10} } }
+      }
+    }
+  });
+}
+
+function closeCamChart() {
+  document.getElementById('cam-chart-modal').style.display = 'none';
+  if (camChartObj) { camChartObj.destroy(); camChartObj = null; }
+}
+
 loadHistory();
+loadCameraHistory();
 updateStatus();
 fetchResponses();
 setInterval(updateStatus, 15000);
 setInterval(fetchResponses, 30000);
+setInterval(loadCameraHistory, 300000);   // refresh camera ML every 5 min
+
+async function clearAnomalies() {
+  await fetch('/api/clear/anomalies', {method:'POST'});
+  document.getElementById('anomaly-list').innerHTML =
+    '<div class="anomaly INFO"><div class="sev">STATUS</div>Cleared</div>';
+}
+
+async function clearResponses() {
+  await fetch('/api/clear/responses', {method:'POST'});
+  document.getElementById('auto-response-list').innerHTML =
+    '<div class="auto-resp"><div class="sev">AUTO-RESPONSE ENGINE</div><div class="body">Cleared</div></div>';
+}
 </script>
 </body>
 </html>"""
@@ -1465,5 +1918,8 @@ if __name__ == "__main__":
 
     poller = threading.Thread(target=polling_loop, daemon=True)
     poller.start()
+
+    cam_hist = threading.Thread(target=camera_history_loop, daemon=True)
+    cam_hist.start()
 
     uvicorn.run(app, host="0.0.0.0", port=5000, log_level="warning")

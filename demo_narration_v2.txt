@@ -1,0 +1,17 @@
+This is the ICP Smart Building Observability Platform — a live AI observability system built by Innovation Central Perth at Curtin University, running on real Cisco Meraki hardware right here in our space.
+
+Every two minutes the platform polls three data sources simultaneously: our MT10 environmental sensor for temperature and humidity, our MS355 network switch for per-port traffic and power consumption, and three MV12W cameras with Meraki MV Sense occupancy analytics — covering the ICP Workshop, the Demo Area, and the Pantry.
+
+All of this streams into Splunk Enterprise via HTTP Event Collector, where Splunk's Machine Learning Toolkit runs anomaly detection and time-series forecasting on the ingested data.
+
+But we have added a second AI layer that runs entirely inside the agent. Every ten minutes, the Camera AI module fetches a full twenty-four hours of per-minute occupancy data from each camera — that is over fourteen hundred data points per camera — and runs crowd-surge detection in-process, with no external ML dependency.
+
+Click any of the camera buttons in the sidebar and you get a full twenty-four hour occupancy timeline. The blue bars show entrances per minute. The green line tracks average occupancy. And the amber diamond markers — those are live Machine Learning anomaly flags plotted directly on the chart. Hover over a marker and you see exactly what triggered it: the anomaly type, severity, and a plain-English description.
+
+The anomaly detection runs on three distinct conditions. First, crowd surge: a sudden entrance spike that is three times or more the typical rate for that hour — this catches unexpected gatherings rather than just absolute headcounts. Second, equipment thermal events: when temperature or humidity spikes but the cameras show zero occupancy — meaning the heat source is not human. That correlation helps us distinguish people warming a room from hardware that might be overheating. Third, threshold triggers: overcrowding above five persons raises a medium alert, and any presence detected between six in the evening and seven in the morning raises a high alert.
+
+When any anomaly is confirmed, the Automated Response Engine fires. It generates an LLM-written incident report, creates a persistent saved alert in Splunk via the REST API, and logs the response as a new event back into Splunk. Data flows in, Splunk AI detects, the LLM interprets, and the automated response flows back out — a complete closed loop.
+
+The natural language chat interface is grounded in all of this live data. Ask a question and the LLM pulls in the current sensor readings, the active anomalies, the camera AI findings, and the Splunk results before answering. Every response explicitly cites what Splunk detected.
+
+Built on real hardware, running live, open source on GitHub.
