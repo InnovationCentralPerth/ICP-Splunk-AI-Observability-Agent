@@ -10,7 +10,7 @@ RemainAfterExit=yes
 User=stanley
 # Wait until Tailscale is connected before enabling funnel
 ExecStartPre=/bin/sh -c 'until tailscale status >/dev/null 2>&1; do sleep 2; done'
-ExecStart=/usr/bin/tailscale funnel --bg 5000
+ExecStart=/usr/bin/tailscale funnel --bg https+insecure://localhost:5000
 ExecStop=/usr/bin/tailscale funnel --https=443 off
 
 [Install]
