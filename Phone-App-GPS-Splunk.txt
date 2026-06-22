@@ -1,0 +1,403 @@
+================================================================================
+  PHONE APP → SPLUNK → GOOGLE MAPS
+  GPS Tracking Integration — Concept, Data Flow & Implementation Reference
+================================================================================
+Project:   PTA Splunk Dash — Public Transport Authority GPS Tracker
+Server:    brannigan.taila277ca.ts.net  (Curtin ICP, Perth WA)
+Date:      2026-06-22
+Status:    WORKING ✓
+================================================================================
+
+
+CONCEPT
+-------
+A Google AI Studio Progressive Web App (PWA) installed on a mobile phone
+captures live GPS coordinates and transmits them to Splunk Enterprise via a
+secure FastAPI proxy running on Brannigan. A Google Maps dashboard — served
+by the same FastAPI server and embedded in a Splunk dashboard — shows the
+phone's real-time position updated every 15 seconds.
+
+Key design decisions:
+  • The phone and server share a Tailscale private network — no public
+    internet exposure of Splunk or internal APIs.
+  • FastAPI acts as a secure proxy: the phone sends plain JSON, the server
+    adds the Splunk HEC token and forwards. The token never touches the client.
+  • FastAPI serves the Google Maps page directly, avoiding Splunk 10.x CSP
+    restrictions that block inline JavaScript in SimpleXML HTML panels.
+  • Tailscale provides a valid TLS certificate for the server hostname,
+    resolving mixed-content browser blocks (AI Studio preview is HTTPS,
+    so all fetch() calls must also be HTTPS).
+
+
+================================================================================
+DATA FLOW
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  MOBILE PHONE  (Android/iOS — Tailscale connected)                      │
+  │                                                                          │
+  │  ┌──────────────────────────────────────────────────────────────────┐   │
+  │  │  Google AI Studio PWA  (app.tsx)                                 │   │
+  │  │                                                                  │   │
+  │  │  navigator.geolocation.watchPosition()                           │   │
+  │  │    → coords.latitude, longitude, accuracy, speed, heading        │   │
+  │  │                                                                  │   │
+  │  │  transmitToSplunk()                                              │   │
+  │  │    POST https://brannigan.taila277ca.ts.net:5000/api/pta/telemetry│  │
+  │  │    Content-Type: application/json                                │   │
+  │  │    { latitude, longitude, accuracy, speed, heading,              │   │
+  │  │      timestamp (ms epoch), vehicleId }                           │   │
+  │  └──────────────────────────────────────────────────────────────────┘   │
+  └───────────────────────────────┬─────────────────────────────────────────┘
+                                  │  HTTPS via Tailscale VPN
+                                  │  (tailscale cert — valid TLS, no warnings)
+                                  ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  BRANNIGAN  (100.81.70.37 on Tailscale)                                 │
+  │                                                                          │
+  │  ┌──────────────────────────────────────────────────────────────────┐   │
+  │  │  FastAPI / uvicorn  (icp-agent.service, port 5000, HTTPS)        │   │
+  │  │                                                                  │   │
+  │  │  POST /api/pta/telemetry                                         │   │
+  │  │    ↓ wraps payload:                                              │   │
+  │  │    { sourcetype: "pta:gps_location", index: "pta", event: {...} }│   │
+  │  │    ↓                                                             │   │
+  │  │  POST https://127.0.0.1:8088/services/collector/event            │   │
+  │  │    Authorization: Splunk REDACTED_SPLUNK_HEC_TOKEN   │   │
+  │  └──────────────────────────────────────────────────────────────────┘   │
+  │                          │                                               │
+  │                          ▼                                               │
+  │  ┌──────────────────────────────────────────────────────────────────┐   │
+  │  │  Splunk Enterprise 10.2.3                                        │   │
+  │  │                                                                  │   │
+  │  │  HEC  :8088  → token: pta_gps_feed                              │   │
+  │  │  Index: pta  │  Sourcetype: pta:gps_location                    │   │
+  │  │                                                                  │   │
+  │  │  Auto-extracts JSON fields from _raw:                            │   │
+  │  │    latitude, longitude, accuracy, speed, heading,                │   │
+  │  │    timestamp, vehicleId                                          │   │
+  │  └──────────────────────────────────────────────────────────────────┘   │
+  │                          │                                               │
+  │           ┌──────────────┘                                               │
+  │           ▼                                                              │
+  │  ┌──────────────────────────────────────────────────────────────────┐   │
+  │  │  GET /api/pta/gps  (FastAPI — polls Splunk every request)        │   │
+  │  │                                                                  │   │
+  │  │  SPL: search index=pta sourcetype="pta:gps_location"            │   │
+  │  │       | stats latest(latitude)  AS lat                          │   │
+  │  │               latest(longitude) AS lon                          │   │
+  │  │               latest(accuracy)  AS accuracy                     │   │
+  │  │               latest(speed)     AS speed_ms                     │   │
+  │  │               latest(heading)   AS heading                      │   │
+  │  │               latest(_time)     AS ts                           │   │
+  │  │             BY vehicleId                                        │   │
+  │  │       | sort -ts | head 1                                       │   │
+  │  │                                                                  │   │
+  │  │  Returns JSON: { found, device_id, lat, lon, accuracy,          │   │
+  │  │                  speed_kmh (×3.6), heading, ts }                │   │
+  │  └──────────────────────────────────────────────────────────────────┘   │
+  │                          │                                               │
+  │                          ▼                                               │
+  │  ┌──────────────────────────────────────────────────────────────────┐   │
+  │  │  GET /pta  (FastAPI — Google Maps HTML page)                     │   │
+  │  │                                                                  │   │
+  │  │  • Polls /api/pta/gps every 15 seconds                          │   │
+  │  │  • Plots bus marker at latest lat/lon                            │   │
+  │  │  • Info window: vehicleId, coords, accuracy, speed, heading      │   │
+  │  │  • Google Maps JS API key embedded server-side                   │   │
+  │  └──────────────────────────────────────────────────────────────────┘   │
+  └─────────────────────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  BROWSER / DASHBOARD                                                     │
+  │                                                                          │
+  │  https://brannigan.taila277ca.ts.net:5000/pta                           │
+  │    Standalone Google Maps page — works on any Tailscale device           │
+  │                                                                          │
+  │  http://brannigan.taila277ca.ts.net:8008/en-US/app/search/pta_gps_tracker
+  │    Splunk dashboard — map (iframe) + ping history table + daily count    │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+COMPONENT DETAILS
+================================================================================
+
+── 1. MOBILE APP  (Google AI Studio PWA) ──────────────────────────────────────
+
+  File:        app.tsx
+  Framework:   React + TypeScript
+  GPS method:  navigator.geolocation.watchPosition()
+                 enableHighAccuracy: true
+                 maximumAge: 5000ms
+                 timeout: 10000ms
+
+  Vehicle ID:  Generated once as VHL-XXXX, stored in localStorage.
+               User can change it in Settings (not while tracking).
+
+  Payload sent to server:
+    {
+      latitude:  number,      // decimal degrees
+      longitude: number,      // decimal degrees
+      accuracy:  number,      // metres (radius of 68% confidence)
+      speed:     number|null, // metres per second (from Geolocation API)
+      heading:   number|null, // degrees clockwise from true north
+      timestamp: number,      // Date.now() — milliseconds epoch
+      vehicleId: string       // e.g. "VHL-0042" or "STAN-PHONE"
+    }
+
+  Endpoint:  https://brannigan.taila277ca.ts.net:5000/api/pta/telemetry
+  Method:    POST, Content-Type: application/json
+
+  CRITICAL — Why full HTTPS URL, not relative /api/telemetry:
+    AI Studio preview is served from https://aistudio.google.com.
+    A relative URL (/api/telemetry) resolves to Google's servers, which
+    cannot reach the Tailscale-only Brannigan.
+    Using an absolute URL forces the browser to POST directly to Brannigan
+    over the Tailscale VPN from the phone.
+
+  CRITICAL — Why HTTPS not HTTP:
+    Browsers enforce mixed-content policy: an HTTPS page cannot make
+    HTTP fetch() calls. AI Studio preview is HTTPS, so the target URL
+    must also be HTTPS. Tailscale cert resolves this without self-signed
+    certificate warnings.
+
+  transmitToSplunk function (key change from original):
+    // Original (broken — goes to Google Cloud, cannot reach Tailscale):
+    fetch('/api/telemetry', { ... })
+
+    // Fixed (direct to Brannigan via Tailscale, HTTPS):
+    fetch('https://brannigan.taila277ca.ts.net:5000/api/pta/telemetry', { ... })
+
+
+── 2. TAILSCALE ───────────────────────────────────────────────────────────────
+
+  Tailnet:          stanleyoz@ / innovationcentralau@
+  Server node:      brannigan.taila277ca.ts.net  (100.81.70.37)
+  Phone node:       Must be connected to same tailnet
+  TLS certificate:  Generated with: sudo tailscale cert brannigan.taila277ca.ts.net
+                    Stored at: /etc/ssl/icp/brannigan.taila277ca.ts.net.crt
+                               /etc/ssl/icp/brannigan.taila277ca.ts.net.key
+                    Owner: stanley:stanley (service runs as stanley)
+
+  Note on Android: ICMP ping is blocked on Android for non-root apps.
+    Use curl to test connectivity instead:
+      curl https://brannigan.taila277ca.ts.net:5000/api/pta/gps
+
+
+── 3. FASTAPI PROXY  (icp_observability_agent.py) ─────────────────────────────
+
+  Service:     icp-agent.service  (systemd)
+  Port:        5000  (HTTPS)
+  SSL cert:    /etc/ssl/icp/brannigan.taila277ca.ts.net.crt
+  SSL key:     /etc/ssl/icp/brannigan.taila277ca.ts.net.key
+  CORS:        CORSMiddleware — allow_origins=["*"]
+
+  Endpoints added for PTA:
+
+  POST /api/pta/telemetry
+    Receives phone GPS payload, wraps in Splunk HEC envelope, forwards.
+    HEC token used: _PTA_HEC_TOKEN = "REDACTED_SPLUNK_HEC_TOKEN"
+    Splunk envelope:
+      { "sourcetype": "pta:gps_location", "index": "pta", "event": <payload> }
+    Returns: { "status": "ok", "splunk": { "text": "Success", "code": 0 } }
+
+  GET /api/pta/gps
+    Queries Splunk management API for latest GPS fix.
+    Splunk user: icp / icp12345  (port 8089)
+    Returns most recently seen vehicle (sorted by _time descending).
+    Converts speed from m/s → km/h (× 3.6).
+    Returns: { found, device_id, lat, lon, accuracy, speed_kmh, heading, ts }
+
+  GET /pta
+    Returns full Google Maps HTML page.
+    Polls /api/pta/gps every 15 seconds.
+    Renders bus marker with info window at latest GPS position.
+    Google Maps API key: REDACTED_GOOGLE_MAPS_API_KEY
+
+
+── 4. SPLUNK ENTERPRISE ───────────────────────────────────────────────────────
+
+  Version:     10.2.3
+  Web port:    8008  (not default 8000)
+  HEC port:    8088
+  Mgmt port:   8089
+
+  Index:       pta
+               Created: 2026-06-22
+               Path: /opt/splunk/var/lib/splunk/pta/
+
+  HEC Input:   pta_gps_feed
+               Token: REDACTED_SPLUNK_HEC_TOKEN
+               Default sourcetype: pta:gps_location
+               Default index: pta
+
+  Sourcetype:  pta:gps_location
+               JSON auto-extraction enabled by default (no props.conf needed)
+               Fields: latitude, longitude, accuracy, speed, heading,
+                       timestamp, vehicleId
+
+  CORS:        Configured in /opt/splunk/etc/system/local/inputs.conf
+               [http]
+               enableSSL = 1
+               crossOriginPosting = 1
+               allowedOrigins = *
+               Note: Splunk 10.x CORS headers were unreliable for direct
+               browser → HEC calls; FastAPI proxy is the preferred path.
+
+  Dashboard:   pta_gps_tracker  (sharing: app, namespace: nobody/search)
+               URL: http://brannigan.taila277ca.ts.net:8008/en-US/app/search/pta_gps_tracker
+               Panel 1: iframe → https://brannigan.taila277ca.ts.net:5000/pta
+               Panel 2: GPS ping history table (30 rows, 30s refresh)
+               Panel 3: Total pings today (single value)
+
+  History table search:
+    index=pta sourcetype="pta:gps_location"
+    | eval time=strftime(_time, "%Y-%m-%d %H:%M:%S")
+    | eval coords=latitude.", ".longitude
+    | eval speed_kmh=if(isnotnull(speed), round(speed*3.6,1), "—")
+    | eval heading=if(isnotnull(heading), round(heading,0)."°", "—")
+    | table time, vehicleId, coords, accuracy, speed_kmh, heading
+    | sort -time | head 30
+
+
+── 5. GOOGLE MAPS ─────────────────────────────────────────────────────────────
+
+  API:         Maps JavaScript API
+  Key:         REDACTED_GOOGLE_MAPS_API_KEY
+  Project:     PTA Splunk Dash  (Google Cloud Console)
+  Restriction: HTTP referrers — brannigan.taila277ca.ts.net
+
+  Map config:  Default centre: Perth CBD (-31.9505, 115.8605)
+               Default zoom: 14
+               Marker icon: bus.png (Google Maps standard)
+               Info window fields: vehicleId, lat, lon, accuracy,
+                                   speed (km/h), heading (compass + degrees),
+                                   last seen (local time)
+
+  Heading display:  Converted to compass bearing
+    ['N','NE','E','SE','S','SW','W','NW'][Math.round(deg/45) % 8] + deg°
+
+  Refresh:     15-second poll of /api/pta/gps
+               Map re-centres and moves marker on each update
+
+
+================================================================================
+LESSONS LEARNED / GOTCHAS
+================================================================================
+
+1. MIXED CONTENT BLOCK (most important)
+   AI Studio preview (HTTPS) cannot fetch HTTP endpoints.
+   Browser silently drops the request — no error shown to user,
+   Packets Sent counter stays at 0, nothing reaches the server.
+   Fix: HTTPS everywhere. Use `tailscale cert` for a valid cert.
+
+2. RELATIVE URL GOES TO GOOGLE'S CLOUD
+   fetch('/api/telemetry') in the AI Studio app resolves to
+   https://aistudio.google.com/api/telemetry — Google's servers,
+   which cannot reach Tailscale-only addresses.
+   Fix: Always use the full absolute URL.
+
+3. SPLUNK HTML PANEL CSP (Splunk 10.x)
+   SimpleXML encoded="0" HTML panels do not execute inline JavaScript
+   in Splunk 10.x due to Content Security Policy restrictions.
+   The raw HTML/JS is rendered as escaped text.
+   Fix: Serve the map from FastAPI and embed via encoded="1" iframe.
+
+4. SPLUNK WEB PORT IS 8008 (not 8000)
+   This installation runs Splunk Web on port 8008.
+   Always confirm with: sudo ss -tlnp | grep splunk
+
+5. ANDROID BLOCKS PING (ICMP)
+   `ping` in Termux/Android always fails for non-root — not a network issue.
+   Use curl to test connectivity instead.
+
+6. WRONG HEC TOKEN
+   The existing .env had SPLUNK_HEC_TOKEN pointing to the meraki-switch
+   HEC input. A dedicated pta_gps_feed token was created and hardcoded
+   as _PTA_HEC_TOKEN in the FastAPI code to keep the data sources clean.
+
+7. DASHBOARD SHARING
+   Dashboards created via REST API default to user-level sharing (private).
+   Must explicitly set sharing=app via the ACL endpoint after creation.
+
+8. head 1 WITHOUT sort
+   `stats ... BY vehicleId | head 1` returns an arbitrary row.
+   Always add `| sort -ts` before `| head 1` to get the most recent vehicle.
+
+9. JSON FIELD EXTRACTION
+   Splunk auto-extracts JSON fields from _raw for this sourcetype.
+   Adding `| spath` on top causes duplicate multi-value fields.
+   Do not use spath — the fields are already available.
+
+10. TAILSCALE IP vs HOSTNAME
+    The Tailscale cert is issued for the hostname (brannigan.taila277ca.ts.net),
+    not the IP (100.81.70.37). Using the IP with HTTPS causes cert mismatch.
+    Always use the full hostname in URLs.
+
+
+================================================================================
+QUICK REFERENCE — URLS & CREDENTIALS
+================================================================================
+
+  Live map (standalone):
+    https://brannigan.taila277ca.ts.net:5000/pta
+
+  Splunk dashboard:
+    http://brannigan.taila277ca.ts.net:8008/en-US/app/search/pta_gps_tracker
+
+  Telemetry endpoint (phone → server):
+    POST https://brannigan.taila277ca.ts.net:5000/api/pta/telemetry
+
+  GPS data API (server → Splunk query):
+    GET  https://brannigan.taila277ca.ts.net:5000/api/pta/gps
+
+  Splunk HEC token (pta_gps_feed):
+    REDACTED_SPLUNK_HEC_TOKEN
+
+  Splunk index:
+    pta  /  sourcetype: pta:gps_location
+
+  Splunk login:
+    http://brannigan.taila277ca.ts.net:8008  —  icp / icp12345
+
+  Google Maps API key:
+    REDACTED_GOOGLE_MAPS_API_KEY
+
+  TLS cert location (Brannigan):
+    /etc/ssl/icp/brannigan.taila277ca.ts.net.crt
+    /etc/ssl/icp/brannigan.taila277ca.ts.net.key
+    Renew with: sudo tailscale cert brannigan.taila277ca.ts.net
+
+
+================================================================================
+MANUAL TEST (Termux / any curl client on Tailscale)
+================================================================================
+
+  # Send a GPS ping:
+  curl -X POST https://brannigan.taila277ca.ts.net:5000/api/pta/telemetry \
+    -H "Content-Type: application/json" \
+    -d "{\"latitude\":-32.007698,\"longitude\":115.894151,\"accuracy\":5,\
+\"speed\":0,\"heading\":0,\"timestamp\":$(date +%s)000,\"vehicleId\":\"STAN-PHONE\"}"
+
+  # Check latest position:
+  curl https://brannigan.taila277ca.ts.net:5000/api/pta/gps
+
+  # Verify in Splunk:
+  index=pta sourcetype="pta:gps_location" | sort -_time | head 5
+
+
+================================================================================
+FILES IN THIS PROJECT
+================================================================================
+
+  icp_observability_agent.py   Main FastAPI agent — PTA routes at bottom
+  pta_gps_dashboard.xml        Splunk dashboard (import via Settings > UI)
+  PTA-Splunk-Dash-Setup.txt    Step-by-step setup guide
+  Phone-App-GPS-Splunk.txt     This document
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================

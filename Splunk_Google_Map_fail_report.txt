@@ -1,0 +1,134 @@
+SPLUNK GOOGLE MAPS EMBED — FAILURE REPORT
+==========================================
+Date: 2026-06-22
+Project: ICP Building Observability Agent — PTA GPS Tracker Dashboard
+
+APPLICATION CONTEXT
+-------------------
+The ICP observability platform runs on a single Linux machine (hostname: brannigan,
+reachable externally via Tailscale at brannigan.taila277ca.ts.net).
+
+Components on this machine:
+  - Splunk Enterprise 9.x  →  http://127.0.0.1:8008  (local) / http://brannigan:8008
+  - FastAPI/uvicorn app    →  port 5000, bound on 0.0.0.0
+  - Tailscale funnel       →  exposes port 5000 as https://brannigan.taila277ca.ts.net:5000
+
+The FastAPI app serves:
+  GET /pta              — HTML page with Google Maps JS API (interactive live map)
+  GET /api/pta/gps      — JSON: latest GPS fix from the pta Splunk index
+  POST /api/pta/telemetry — receives GPS pings from the mobile app
+
+The goal was to embed the live GPS map inside the Splunk Classic Dashboard
+(pta_gps_tracker.xml, version 1.1) via an HTML panel.
+
+The map page works perfectly when opened directly at:
+  https://brannigan.taila277ca.ts.net:5000/pta
+
+GPS data confirmed flowing: 59+ pings in Splunk index (pta, sourcetype pta:gps_location).
+
+
+WHAT WAS ATTEMPTED AND WHY IT FAILED
+-------------------------------------
+
+1. IFRAME POINTING TO TAILSCALE URL (original approach)
+   Dashboard XML: <iframe src="https://brannigan.taila277ca.ts.net:5000/pta">
+   Result: "Continue with external content?" dialog appeared. After clicking Continue,
+           map still did not load.
+   Root cause: Splunk's dashboards_csp feature treats any URL not on its trusted
+               domains list as external. The dialog warns but does NOT grant access —
+               the underlying CSP still blocks the content from rendering.
+
+2. ENABLE_IFRAME_DEFAULT IN WEB.CONF
+   Added: enable_iframe_default = true  to /opt/splunk/etc/system/local/web.conf
+   Result: No change. The trusted domains dialog and block persisted.
+   Root cause: This setting relates to Splunk being embedded in other pages (X-Frame-
+               Options), not to content Splunk loads inside its own panels.
+
+3. IFRAME POINTING TO LOCALHOST (127.0.0.1:5000)
+   Changed iframe src to: http://127.0.0.1:5000/pta
+   Rationale: Since both Splunk and the FastAPI app run on the same machine,
+              localhost should not trigger the external content check.
+   Result: Still triggered "The dashboard is attempting to receive content from
+           outside of Splunk" — URL shown was http://127.0.0.1:5000/pta.
+   Root cause: Splunk treats any port that is not its own (8008) as external,
+               including 127.0.0.1 on a different port.
+
+4. DASHBOARDS_TRUSTED_DOMAINS_LIST = FALSE IN WEB.CONF
+   Added: dashboards_trusted_domains_list = false  to web.conf [settings]
+   Result: No change. Dialog and block persisted.
+   Root cause: This setting is a web-features.conf setting, not web.conf.
+               Writing it to web.conf has no effect.
+
+5. ADDING TAILSCALE DOMAIN TO WEB-FEATURES.CONF TRUSTED LIST
+   Created /opt/splunk/etc/system/local/web-features.conf:
+     [feature:dashboards_csp]
+     internal.dashboards_trusted_domain.tailscale_brannigan = brannigan.taila277ca.ts.net
+   Result: The "Continue with external content" dialog disappeared. However, the map
+           still did not render inside the Splunk HTML panel.
+   Root cause: Trusting the domain removes the dialog/warning but does NOT remove
+               the Content Security Policy that Splunk applies to HTML panel iframes.
+               The Google Maps JS API (maps.googleapis.com) was still being blocked
+               silently at the CSP level — no warning, just no map.
+
+6. INLINE GOOGLE MAPS JS DIRECTLY IN HTML PANEL (no nested iframe)
+   Replaced the <iframe> with the full Google Maps JS embed code directly inside
+   the <html encoded="1"> panel, including:
+     - <script src="https://maps.googleapis.com/maps/api/js?...&callback=initPTAMap">
+     - Full initPTAMap() initialization function
+     - fetch() polling to https://brannigan.taila277ca.ts.net:5000/api/pta/gps
+   Result: Panel rendered the header div and status bar (static HTML visible), but
+           the #map div remained blank. Status stayed "Waiting for GPS data..." and
+           timestamp stayed "Connecting..." — confirming JavaScript did not execute.
+   Root cause: Splunk's HTML panel (version 1.1 Classic Dashboard) wraps content in
+               a sandboxed iframe that blocks external scripts. maps.googleapis.com
+               was silently blocked by CSP before initPTAMap() could be called.
+
+7. ENABLE_DASHBOARDS_EXTERNAL_CONTENT_RESTRICTION = FALSE IN WEB-FEATURES.CONF
+   Added to local web-features.conf:
+     enable_dashboards_external_content_restriction = false
+     enable_dashboards_redirection_restriction = false
+   Also added googleapis.com domains to trusted list.
+   Result: No change. Google Maps JS still did not load.
+   Root cause: This setting controls the user-facing dialog/warning only.
+               The actual CSP applied to the HTML panel sandbox iframe is enforced
+               at a lower level and is not toggled by this setting.
+
+8. GOOGLE MAPS STATIC API (image, no JS required)
+   Replaced the JS map with an <img> tag pointing to:
+     https://maps.googleapis.com/maps/api/staticmap?center=...&key=...
+   Rationale: Images use img-src CSP directive, which might be less restricted
+              than script-src. No JS API needed.
+   Result: Image did not load. Status div stayed at static default text, timestamp
+           stayed "Connecting..." — confirming JavaScript also not running.
+   Root cause: maps.googleapis.com is blocked for ALL resource types (scripts,
+               images, fetch) by Splunk's HTML panel CSP. Even <img> tags pointing
+               to external domains are blocked.
+
+9. SPLUNK STATIC FILE APPROACH (attempted, not yet confirmed)
+   Created /opt/splunk/etc/apps/search/appserver/static/pta_map.html with the full
+   Google Maps page, then iframed it from the dashboard panel using:
+     <iframe src="/en-US/static/app/search/pta_map.html">
+   Rationale: File served by Splunk on port 8008 is same-origin — no external
+              content check, potentially different CSP rules.
+   Result: Not confirmed working before work was paused.
+
+
+CURRENT WORKING SOLUTION
+--------------------------
+Access the live GPS map directly via the FastAPI app:
+  https://brannigan.taila277ca.ts.net:5000/pta
+
+This renders correctly with full Google Maps interactive view, live device tracking,
+GPS info popup, and auto-refresh every 15 seconds.
+
+
+KEY LESSON
+----------
+Splunk Classic Dashboard HTML panels (version 1.1) apply a strict Content Security
+Policy to their sandboxed iframe that cannot be fully overridden via web.conf or
+web-features.conf alone. External scripts, images, and iframes from non-Splunk
+domains are blocked at the browser CSP level regardless of the trusted domains list
+configuration. Embedding third-party map APIs (Google Maps JS) inside a Splunk
+Classic Dashboard HTML panel is not straightforward without deeper app development
+(custom visualizations, Splunk JS SDK, or serving assets through Splunk's own
+static file server with appropriate CSP headers).

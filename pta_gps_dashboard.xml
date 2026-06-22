@@ -1,0 +1,65 @@
+<dashboard version="1.1" theme="dark">
+  <label>PTA GPS Tracker</label>
+  <description>Public Transport Authority — Real-time GPS tracking via Google Maps</description>
+
+  <row>
+    <panel>
+      <title>Live Location Map</title>
+      <html encoded="1">
+        <![CDATA[
+        <style>* { margin:0; padding:0; } body { background:#0d1117; }</style>
+        <iframe src="/en-US/static/app/search/pta_map.html"
+                style="width:100%;height:540px;border:none;"
+                allowfullscreen>
+        </iframe>
+        ]]>
+      </html>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>GPS Ping History (last 1 hour)</title>
+      <table>
+        <search>
+          <query>
+            index=pta sourcetype="pta:gps_location"
+            | eval time=strftime(_time, "%Y-%m-%d %H:%M:%S")
+            | eval coords=latitude.", ".longitude
+            | eval speed_kmh=if(isnotnull(speed), round(speed*3.6,1), "—")
+            | eval heading=if(isnotnull(heading), round(heading,0)."°", "—")
+            | table time, vehicleId, coords, accuracy, speed_kmh, heading
+            | rename time AS "Time (local)", vehicleId AS "Vehicle",
+                     coords AS "Lat, Lon", accuracy AS "Accuracy (m)",
+                     speed_kmh AS "Speed (km/h)", heading AS "Heading"
+            | sort -"Time (local)"
+            | head 30
+          </query>
+          <earliest>-1h</earliest>
+          <latest>now</latest>
+          <refresh>30s</refresh>
+        </search>
+        <option name="refresh.display">progressbar</option>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+    <panel>
+      <title>Total Pings Today</title>
+      <single>
+        <search>
+          <query>
+            index=pta sourcetype="pta:gps_location"
+            | stats count AS pings
+          </query>
+          <earliest>@d</earliest>
+          <latest>now</latest>
+          <refresh>60s</refresh>
+        </search>
+        <option name="colorMode">block</option>
+        <option name="rangeColors">["0x53A051","0x0877A6","0xF8BE34","0xF1813F","0xDC4E41"]</option>
+        <option name="refresh.display">progressbar</option>
+      </single>
+    </panel>
+  </row>
+
+</dashboard>

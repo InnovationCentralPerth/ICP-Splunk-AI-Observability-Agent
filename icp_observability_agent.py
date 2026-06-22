@@ -49,6 +49,7 @@ import requests
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 from dotenv import load_dotenv
@@ -1128,6 +1129,13 @@ def polling_loop():
 # ── FastAPI app ──────────────────────────────────────────────────────────────
 app = FastAPI(title="ICP Splunk AI Observability Agent : Splunk Enterprise", version="2.0")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
 _LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ICP transparent logo.png")
 
 class ChatRequest(BaseModel):
@@ -1254,6 +1262,159 @@ async def get_narrative():
     narrative = generate_narrative(ctx)
     state["last_narrative"] = narrative
     return {"narrative": narrative}
+
+
+# ── PTA GPS Tracker ───────────────────────────────────────────────────────────
+_PTA_MAPS_KEY   = os.getenv("PTA_MAPS_KEY", "")
+_PTA_HEC_TOKEN  = os.getenv("PTA_HEC_TOKEN", "")
+
+@app.post("/api/pta/telemetry")
+async def pta_telemetry(payload: dict):
+    """Proxy GPS telemetry from the phone app to Splunk HEC (keeps HEC token server-side)."""
+    hec_payload = {
+        "sourcetype": "pta:gps_location",
+        "index":      "pta",
+        "event":      payload,
+    }
+    try:
+        resp = requests.post(
+            SPLUNK_HEC_URL,
+            headers={"Authorization": f"Splunk {_PTA_HEC_TOKEN}"},
+            json=hec_payload,
+            verify=False,
+            timeout=10,
+        )
+        if resp.ok:
+            return {"status": "ok", "splunk": resp.json()}
+        raise HTTPException(status_code=502, detail=resp.text)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@app.get("/api/pta/gps")
+async def get_pta_gps():
+    # Field names match the app.tsx payload: latitude, longitude, vehicleId, speed (m/s), heading
+    spl = (
+        'search index=pta sourcetype="pta:gps_location" '
+        '| stats latest(latitude) AS lat latest(longitude) AS lon '
+        'latest(accuracy) AS accuracy latest(speed) AS speed_ms '
+        'latest(heading) AS heading latest(_time) AS ts BY vehicleId '
+        '| sort -ts | head 1'
+    )
+    try:
+        resp = requests.post(
+            f"{SPLUNK_MGMT_URL}/services/search/jobs/export",
+            auth=(SPLUNK_USERNAME, SPLUNK_PASSWORD),
+            data={"search": spl, "output_mode": "json",
+                  "exec_mode": "oneshot", "earliest_time": "-1h", "latest_time": "now"},
+            verify=False, timeout=15,
+        )
+        for line in resp.text.strip().split("\n"):
+            try:
+                obj = json.loads(line.strip())
+                if "result" in obj:
+                    r = obj["result"]
+                    raw_heading = r.get("heading")
+                    return {
+                        "found":      True,
+                        "device_id":  r.get("vehicleId", "unknown"),
+                        "lat":        float(r.get("lat", 0)),
+                        "lon":        float(r.get("lon", 0)),
+                        "accuracy":   float(r.get("accuracy", 0)),
+                        "speed_kmh":  float(r.get("speed_ms") or 0) * 3.6,
+                        "heading":    float(raw_heading) if raw_heading not in (None, "null", "", "None") else None,
+                        "ts":         float(r.get("ts", 0)),
+                    }
+            except Exception:
+                pass
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"found": False}
+
+
+_PTA_MAP_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PTA GPS Tracker</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body { font-family: 'Segoe UI', sans-serif; background: #0d1117; color: #e6edf3;
+         display: flex; flex-direction: column; }
+  #hdr { background: #161b22; border-bottom: 1px solid #30363d;
+         padding: 10px 16px; display: flex; align-items: center; gap: 12px; }
+  #hdr h1 { font-size: 16px; font-weight: 600; }
+  #hdr span { font-size: 12px; color: #8b949e; margin-left: auto; }
+  #status { font-family: monospace; font-size: 13px; padding: 8px 16px;
+            background: #0d1117; color: #00d4ff; border-bottom: 1px solid #21262d; }
+  #map { flex: 1; width: 100%; min-height: 420px; }
+</style>
+</head>
+<body>
+<div id="hdr">
+  <h1>PTA GPS Tracker</h1>
+  <span id="ts">Connecting...</span>
+</div>
+<div id="status">Waiting for GPS data from mobile app...</div>
+<div id="map"></div>
+<script>
+var REFRESH = 15000;
+var map, marker, info;
+window.initPTAMap = function () {
+  map    = new google.maps.Map(document.getElementById('map'), {
+             zoom: 14, center: {lat: -31.9505, lng: 115.8605},
+             mapTypeId: 'roadmap', streetViewControl: false });
+  marker = new google.maps.Marker({ map: map, title: 'PTA Device',
+             icon: 'https://maps.google.com/mapfiles/ms/icons/bus.png' });
+  info   = new google.maps.InfoWindow();
+  poll(); setInterval(poll, REFRESH);
+};
+function headingArrow(deg) {
+  if (deg == null) return '—';
+  var dirs = ['N','NE','E','SE','S','SW','W','NW'];
+  return dirs[Math.round(deg / 45) % 8] + ' ' + Math.round(deg) + '\xb0';
+}
+function poll() {
+  fetch('/api/pta/gps')
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (d.found) {
+        var pos = {lat: d.lat, lng: d.lon};
+        map.setCenter(pos); marker.setPosition(pos);
+        info.setContent(
+          '<b style="color:#1a73e8">' + d.device_id + '</b>' +
+          '<table style="font-size:12px;margin-top:4px;min-width:190px">' +
+          '<tr><td>Lat</td><td>&nbsp;' + d.lat.toFixed(6) + '</td></tr>' +
+          '<tr><td>Lon</td><td>&nbsp;' + d.lon.toFixed(6) + '</td></tr>' +
+          '<tr><td>Accuracy</td><td>&nbsp;\xb1' + d.accuracy.toFixed(0) + ' m</td></tr>' +
+          '<tr><td>Speed</td><td>&nbsp;' + d.speed_kmh.toFixed(1) + ' km/h</td></tr>' +
+          '<tr><td>Heading</td><td>&nbsp;' + headingArrow(d.heading) + '</td></tr>' +
+          '<tr><td>Updated</td><td>&nbsp;' + (d.ts ? new Date(d.ts*1000).toLocaleTimeString() : '—') + '</td></tr>' +
+          '</table>');
+        info.open(map, marker);
+        document.getElementById('status').textContent =
+          d.device_id + '  @  ' + d.lat.toFixed(5) + ', ' + d.lon.toFixed(5) +
+          '  \xb1' + d.accuracy.toFixed(0) + 'm' +
+          (d.speed_kmh > 0.5 ? '  ' + d.speed_kmh.toFixed(1) + ' km/h' : '  stationary');
+      } else {
+        document.getElementById('status').textContent =
+          'No GPS pings yet — tap Engage Tracker in the mobile app.';
+      }
+      document.getElementById('ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
+    })
+    .catch(function(e){ document.getElementById('status').textContent = 'Error: ' + e.message; });
+}
+</script>
+<script src="https://maps.googleapis.com/maps/api/js?key=""" + _PTA_MAPS_KEY + """&callback=initPTAMap" async defer></script>
+</body>
+</html>"""
+
+@app.get("/pta", response_class=HTMLResponse)
+async def pta_map():
+    return _PTA_MAP_HTML
+
 
 # ── Chatbot HTML UI ──────────────────────────────────────────────────────────
 HTML_UI = """<!DOCTYPE html>
@@ -1922,4 +2083,8 @@ if __name__ == "__main__":
     cam_hist = threading.Thread(target=camera_history_loop, daemon=True)
     cam_hist.start()
 
-    uvicorn.run(app, host="0.0.0.0", port=5000, log_level="warning")
+    uvicorn.run(
+        app, host="0.0.0.0", port=5000, log_level="warning",
+        ssl_certfile="/etc/ssl/icp/brannigan.taila277ca.ts.net.crt",
+        ssl_keyfile="/etc/ssl/icp/brannigan.taila277ca.ts.net.key",
+    )

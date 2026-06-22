@@ -1,0 +1,382 @@
+================================================================================
+  SENSOR → SPLUNK → HOME ASSISTANT  |  ICP Operations Management Demo
+  Colleague data-feed via Tailscale
+================================================================================
+Date:        2026-06-22
+Server:      brannigan.taila277ca.ts.net  (Stanley's ICP server)
+Splunk:      Splunk Enterprise 10.2.3 (localhost:8088 HEC / localhost:8089 mgmt)
+Agent API:   http://brannigan.taila277ca.ts.net:5000
+Colleague:   joins Tailnet, sends sensor data, monitors via Home Assistant
+================================================================================
+
+
+OVERVIEW
+--------
+  1. Stanley's Splunk server already accepts events on port 8088 via HEC.
+  2. Colleague's device joins the same Tailscale network (tailnet).
+  3. Colleague runs a small Python sensor feed script that POSTs JSON events
+     to Splunk using a dedicated HEC token and sourcetype (icp:ext_sensor).
+  4. Stanley creates a Splunk saved search that surfaces the new feed.
+  5. Colleague's Home Assistant queries Splunk (via REST sensor) and shows
+     live readings on a dashboard.
+
+
+================================================================================
+PART 1 — TAILSCALE CONNECTIVITY
+================================================================================
+
+On Stanley's server (brannigan)
+--------------------------------
+1a. Verify Tailscale is running and the server is reachable:
+
+      tailscale status
+      # Should show:  brannigan  <IP>  ...  online
+
+1b. Decide which Splunk ports to expose on Tailscale.
+    Tailscale uses its own IP space; Splunk binds to 0.0.0.0 by default so
+    it is already reachable at the Tailscale IP.  Confirm:
+
+      curl -k https://$(tailscale ip -4):8088/services/collector/health
+      # Expected:  {"text":"HEC is healthy","code":17}
+
+    If firewall blocks it, open the ports only for the tailscale0 interface:
+
+      sudo ufw allow in on tailscale0 to any port 8088 comment "Splunk HEC - Tailscale"
+      sudo ufw allow in on tailscale0 to any port 8089 comment "Splunk mgmt - Tailscale"
+      sudo ufw allow in on tailscale0 to any port 5000 comment "ICP Agent - Tailscale"
+
+On Colleague's device
+----------------------
+1c. Install Tailscale:
+      https://tailscale.com/download   (Linux/Mac/Windows/RPi all supported)
+
+1d. Log in to Stanley's tailnet:
+      tailscale up --login-server https://login.tailscale.com
+
+    Stanley approves the device in the Tailscale admin console at
+    https://login.tailscale.com/admin/machines
+
+1e. Confirm connectivity from colleague's device:
+
+      ping brannigan.taila277ca.ts.net
+      curl -k https://brannigan.taila277ca.ts.net:8088/services/collector/health
+      # Should return {"text":"HEC is healthy","code":17}
+
+
+================================================================================
+PART 2 — SPLUNK: DEDICATED HEC TOKEN + INDEX SETUP
+================================================================================
+Do this on Stanley's server (Splunk web UI or REST API).
+
+2a. Create a dedicated HEC token for colleague's sensor feed.
+
+    Via Splunk Web  (http://brannigan.taila277ca.ts.net:8000):
+      Settings → Data Inputs → HTTP Event Collector → New Token
+        Name:        ext_sensor_feed
+        Source type: (new) icp:ext_sensor
+        Index:       main   (or create a dedicated "icp" index if not already done)
+      Save — copy the generated token (e.g.  xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+
+    Via REST API (from brannigan terminal):
+      curl -k -u admin:$SPLUNK_PASSWORD \
+        -X POST https://127.0.0.1:8089/services/data/inputs/http \
+        -d name=ext_sensor_feed \
+        -d sourcetype=icp:ext_sensor \
+        -d index=main
+      # Response will include the generated token value.
+
+2b. Share the token value with your colleague securely
+    (e.g. via Tailscale SSH session or a secrets tool — do NOT put it in chat).
+
+2c. Verify the token works from brannigan:
+
+      curl -k https://127.0.0.1:8088/services/collector/event \
+        -H "Authorization: Splunk <TOKEN>" \
+        -d '{"sourcetype":"icp:ext_sensor","event":{"sensor":"test","value":42}}'
+      # Expected:  {"text":"Success","code":0}
+
+
+================================================================================
+PART 3 — COLLEAGUE: SENSOR FEED SCRIPT
+================================================================================
+Run this on the colleague's device (Python 3.8+).
+
+3a. Install dependencies:
+      pip install requests
+
+3b. Create the file  sensor_feed.py  with the following content:
+
+---------- sensor_feed.py ----------
+import time, json, random, requests, datetime, warnings
+warnings.filterwarnings("ignore")   # suppress SSL verify warnings
+
+SPLUNK_HEC_URL   = "https://brannigan.taila277ca.ts.net:8088/services/collector/event"
+SPLUNK_HEC_TOKEN = "<TOKEN-FROM-STEP-2b>"
+SENSOR_ID        = "colleague-env-01"      # change to identify your device
+LOCATION         = "Remote Office"         # label shown in dashboards
+POLL_SECONDS     = 30                      # how often to push readings
+
+def read_sensor():
+    """Replace with real sensor readings (GPIO, i2c, MQTT, etc.)."""
+    return {
+        "temperature_c":  round(random.uniform(18.0, 26.0), 1),
+        "humidity_pct":   round(random.uniform(40.0, 65.0), 1),
+        "co2_ppm":        random.randint(400, 1200),
+        "occupancy":      random.choice([0, 1]),
+    }
+
+def push_to_splunk(data):
+    payload = {
+        "time":       time.time(),
+        "sourcetype": "icp:ext_sensor",
+        "source":     SENSOR_ID,
+        "host":       SENSOR_ID,
+        "event": {
+            "sensor_id":  SENSOR_ID,
+            "location":   LOCATION,
+            "ts":         datetime.datetime.utcnow().isoformat() + "Z",
+            **data
+        }
+    }
+    r = requests.post(
+        SPLUNK_HEC_URL,
+        headers={"Authorization": f"Splunk {SPLUNK_HEC_TOKEN}"},
+        data=json.dumps(payload),
+        verify=False,
+        timeout=10,
+    )
+    print(f"[{payload['event']['ts']}] pushed: {data}  → HTTP {r.status_code}")
+
+if __name__ == "__main__":
+    print(f"Starting sensor feed from {SENSOR_ID} → Splunk every {POLL_SECONDS}s")
+    while True:
+        try:
+            push_to_splunk(read_sensor())
+        except Exception as e:
+            print(f"ERROR: {e}")
+        time.sleep(POLL_SECONDS)
+---------- end of sensor_feed.py ----------
+
+3c. Run it:
+      python sensor_feed.py
+
+    You should see timestamped lines confirming HTTP 200 responses from Splunk.
+
+3d. (Optional) Run as a background service on Linux:
+      nohup python sensor_feed.py >> sensor_feed.log 2>&1 &
+
+
+================================================================================
+PART 4 — SPLUNK: VERIFY + CREATE SAVED SEARCH
+================================================================================
+Do this on Stanley's server.
+
+4a. Confirm events are arriving. In Splunk Search:
+
+      index=main sourcetype="icp:ext_sensor"
+      | head 20
+      | table _time, sensor_id, location, temperature_c, humidity_pct, co2_ppm, occupancy
+
+    You should see rows from colleague-env-01.
+
+4b. Create a saved search for "latest ext sensor reading" so Home Assistant
+    can poll it via REST:
+
+      Name:   ICP_ExtSensor_Latest
+      Search:
+        index=main sourcetype="icp:ext_sensor"
+        | stats latest(temperature_c) AS temperature_c
+                latest(humidity_pct)  AS humidity_pct
+                latest(co2_ppm)       AS co2_ppm
+                latest(occupancy)     AS occupancy
+                latest(_time)         AS last_seen
+          BY sensor_id, location
+      Schedule: every 1 minute
+
+    Via Splunk Web: Search → Save As → Saved Search → set schedule.
+    Via REST API:
+      curl -k -u admin:$SPLUNK_PASSWORD \
+        -X POST https://127.0.0.1:8089/services/saved/searches \
+        -d "name=ICP_ExtSensor_Latest" \
+        -d "search=index=main sourcetype=\"icp:ext_sensor\" | stats latest(temperature_c) AS temperature_c latest(humidity_pct) AS humidity_pct latest(co2_ppm) AS co2_ppm latest(occupancy) AS occupancy latest(_time) AS last_seen BY sensor_id, location" \
+        -d "cron_schedule=* * * * *" \
+        -d "is_scheduled=1" \
+        -d "enableSched=1"
+
+4c. Test the saved search result via the Splunk REST API (returns JSON):
+
+      curl -k -u admin:$SPLUNK_PASSWORD \
+        "https://127.0.0.1:8089/services/search/jobs/export?search=savedsearch+ICP_ExtSensor_Latest&output_mode=json"
+
+    Alternatively run an ad-hoc search via REST that HA will use:
+
+      curl -k -u admin:$SPLUNK_PASSWORD \
+        -X POST https://127.0.0.1:8089/services/search/jobs \
+        -d "search=search index=main sourcetype=\"icp:ext_sensor\" | stats latest(temperature_c) AS temp, latest(humidity_pct) AS hum, latest(co2_ppm) AS co2 BY sensor_id" \
+        -d "output_mode=json" \
+        -d "exec_mode=oneshot"
+
+
+================================================================================
+PART 5 — HOME ASSISTANT: REST SENSOR SETUP
+================================================================================
+Home Assistant is on the colleague's device (or separate RPi) on the same
+Tailnet.  We use HA's REST sensor integration to pull data from Splunk.
+
+NOTE: Splunk's management API (8089) requires HTTP Basic auth and returns XML
+by default.  We use output_mode=json and exec_mode=oneshot for a single-shot
+search job — Home Assistant's REST sensor handles this cleanly.
+
+5a. In Home Assistant, go to:
+      Settings → Devices & Services → Helpers
+    OR edit  configuration.yaml  directly.
+
+5b. Add a REST sensor block to  configuration.yaml:
+
+---------- configuration.yaml snippet ----------
+rest:
+  - resource: "https://brannigan.taila277ca.ts.net:8089/services/search/jobs/export"
+    method: POST
+    payload: >
+      search=search index%3Dmain sourcetype%3D"icp%3Aext_sensor"
+      %7C stats latest(temperature_c) AS temp latest(humidity_pct) AS hum
+      latest(co2_ppm) AS co2 latest(occupancy) AS occ BY sensor_id
+      &output_mode=json&exec_mode=oneshot
+    headers:
+      Content-Type: application/x-www-form-urlencoded
+      Authorization: !secret splunk_basic_auth
+    verify_ssl: false
+    scan_interval: 60
+    sensor:
+      - name: "ICP Ext Sensor Temperature"
+        value_template: "{{ value_json.results[0].temp }}"
+        unit_of_measurement: "°C"
+        device_class: temperature
+      - name: "ICP Ext Sensor Humidity"
+        value_template: "{{ value_json.results[0].hum }}"
+        unit_of_measurement: "%"
+        device_class: humidity
+      - name: "ICP Ext Sensor CO2"
+        value_template: "{{ value_json.results[0].co2 }}"
+        unit_of_measurement: "ppm"
+        device_class: carbon_dioxide
+      - name: "ICP Ext Sensor Occupancy"
+        value_template: "{{ value_json.results[0].occ }}"
+---------- end of snippet ----------
+
+5c. Add the Splunk credential to  secrets.yaml  (base64 of "admin:password"):
+
+      # In a terminal on the HA host:
+      echo -n "admin:<SPLUNK_PASSWORD>" | base64
+      # outputs e.g. YWRtaW46cGFzc3dvcmQ=
+
+    In secrets.yaml:
+      splunk_basic_auth: "Basic YWRtaW46cGFzc3dvcmQ="
+
+    NOTE: If your HA version supports it, use the Splunk integration from
+    HACS instead — it wraps these REST calls in a friendlier UI.  The manual
+    REST approach above works on any HA version.
+
+5d. Restart Home Assistant:
+      Settings → System → Restart
+
+5e. Verify sensors appear:
+      Developer Tools → States → search "ICP Ext Sensor"
+    You should see Temperature, Humidity, CO2, and Occupancy with real values.
+
+5f. Add sensors to a HA Dashboard:
+      Settings → Dashboards → Edit → Add Card → Entities
+        - ICP Ext Sensor Temperature
+        - ICP Ext Sensor Humidity
+        - ICP Ext Sensor CO2
+        - ICP Ext Sensor Occupancy
+
+    For a richer display use "Glance" or "Gauge" card types.
+
+
+================================================================================
+PART 6 — OPTIONAL: EXPOSE ICP AGENT API TO HOME ASSISTANT
+================================================================================
+The ICP Agent FastAPI server at port 5000 already has REST endpoints.
+HA can also pull from it directly (no Splunk query needed for simple polling).
+
+6a. From HA's device, confirm the API is reachable:
+      curl http://brannigan.taila277ca.ts.net:5000/status
+
+6b. Add a REST sensor for the live agent status:
+
+---------- configuration.yaml snippet ----------
+  - resource: "http://brannigan.taila277ca.ts.net:5000/api/sensor_latest"
+    scan_interval: 120
+    sensor:
+      - name: "ICP Agent Sensor Latest"
+        value_template: "{{ value_json.temperature_c }}"
+        unit_of_measurement: "°C"
+---------- end of snippet ----------
+
+    Adjust the endpoint path and field names to match what the FastAPI server
+    actually exposes — check with:
+      curl http://brannigan.taila277ca.ts.net:5000/docs
+
+
+================================================================================
+PART 7 — END-TO-END VERIFICATION CHECKLIST
+================================================================================
+
+  [ ] Tailscale: colleague's device shows as "online" in tailscale status
+  [ ] Splunk HEC health: curl returns {"text":"HEC is healthy","code":17}
+  [ ] HEC token: test curl with token returns {"text":"Success","code":0}
+  [ ] sensor_feed.py: running, printing "HTTP 200" every 30s
+  [ ] Splunk Search: events visible with sourcetype="icp:ext_sensor"
+  [ ] Saved search ICP_ExtSensor_Latest: returns rows in Splunk Search UI
+  [ ] HA secrets.yaml: splunk_basic_auth base64 string is correct
+  [ ] HA configuration.yaml: no YAML syntax errors (check HA logs on restart)
+  [ ] HA Developer Tools → States: ICP sensors show numeric values (not "unknown")
+  [ ] HA Dashboard: cards display live readings that change every ~60s
+
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Problem: curl to :8088 times out from colleague's device
+  Fix:    On brannigan — sudo ufw allow in on tailscale0 to any port 8088
+          Confirm with: sudo ufw status | grep 8088
+
+Problem: HEC returns 403 Forbidden
+  Fix:    Wrong token.  Re-check Settings → Data Inputs → HTTP Event Collector
+          and ensure the token is Enabled.
+
+Problem: HEC returns 400 — incorrect data format
+  Fix:    The payload must be valid JSON with an "event" key.
+          Check sensor_feed.py for syntax errors.
+
+Problem: Splunk REST search returns XML instead of JSON
+  Fix:    Ensure "&output_mode=json" is in the URL/payload.
+
+Problem: HA sensor shows "unknown" after restart
+  Fix:    Check HA logs:  Settings → System → Logs → search "rest"
+          Common issues: SSL verify failure (set verify_ssl: false),
+          base64 auth wrong, Splunk search returning 0 results.
+
+Problem: HA can't reach brannigan.taila277ca.ts.net:8089
+  Fix:    Ensure HA host is also on the Tailnet.  Test with:
+            curl -k -u admin:PASSWORD https://brannigan.taila277ca.ts.net:8089/services/server/info
+
+
+================================================================================
+SECURITY NOTES
+================================================================================
+  - The HEC token grants write-only access to Splunk — safe to share with
+    the colleague; it cannot be used to read or administer Splunk.
+  - The Splunk management port (8089) requires admin credentials and is
+    only needed by Home Assistant for read queries.  Restrict to Tailscale
+    IPs only (ufw rule above) so it is never exposed to the public internet.
+  - Never commit tokens or passwords to the GitHub repo.  Use .env / secrets.yaml.
+  - For production, create a Splunk role with read-only search permissions
+    and use that account instead of admin in HA's secrets.yaml.
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================

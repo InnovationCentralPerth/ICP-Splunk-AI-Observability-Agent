@@ -1,0 +1,449 @@
+================================================================================
+  PTA SPLUNK DASH  —  GPS Tracking Setup Guide
+  Public Transport Authority | Mobile Phone → Splunk Enterprise → Google Maps
+================================================================================
+Date:     2026-06-22
+Server:   brannigan.taila277ca.ts.net
+Splunk:   Enterprise 10.2.3  |  HEC port 8088  |  Mgmt port 8089
+App:      Google AI Studio Progressive Web App (installed on mobile phone)
+Dashboard file:  pta_gps_dashboard.xml  (in this directory)
+================================================================================
+
+
+ENVIRONMENT VARIABLES YOU WILL SET IN THIS GUIDE
+-------------------------------------------------
+  SPLUNK_HEC_URL          →  set in Part 1
+  SPLUNK_HEC_TOKEN        →  set in Part 1
+  GOOGLE_MAPS_PLATFORM_KEY→  set in Part 2
+
+
+ARCHITECTURE
+------------
+  [Phone PWA]
+    ↓  tap "Send Location"
+    ↓  browser Geolocation API  →  lat / lon / accuracy
+    ↓  HTTP POST (JSON)
+  [Splunk HEC :8088]
+    ↓  sourcetype: pta:gps_location  →  stored in index: pta
+  [Splunk Dashboard]  ← Google Maps JS API
+    ↓  polls Splunk every 15s via /splunkd REST
+    ↓  plots marker on map
+
+
+================================================================================
+PART 1 — SPLUNK: CREATE GPS DATA STORE + HEC TOKEN
+================================================================================
+
+1a. Create a dedicated Splunk index for PTA data.
+
+    Via Splunk Web  (http://brannigan.taila277ca.ts.net:8000):
+      Settings → Indexes → New Index
+        Index Name:   pta
+        Index Type:   Events
+        Max Size:     leave at default (500 MB fine for POC)
+      Save.
+
+    Via REST (run on brannigan terminal):
+      curl -k -u admin:$SPLUNK_PASSWORD \
+        -X POST https://127.0.0.1:8089/services/data/indexes \
+        -d "name=pta" -d "datatype=event"
+
+1b. Create a dedicated HEC token for the GPS feed.
+
+    Via Splunk Web:
+      Settings → Data Inputs → HTTP Event Collector → New Token
+        Name:         pta_gps_feed
+        Source type:  (create new) → pta:gps_location
+        Index:        pta
+      Click through to the end — COPY the generated token value.
+
+    Via REST:
+      curl -k -u admin:$SPLUNK_PASSWORD \
+        -X POST https://127.0.0.1:8089/services/data/inputs/http \
+        -d "name=pta_gps_feed" \
+        -d "sourcetype=pta:gps_location" \
+        -d "index=pta"
+
+      The token value is in the response JSON under "token".
+
+    ── YOUR VALUES ────────────────────────────────────────────────────────────
+    SPLUNK_HEC_URL   =  https://brannigan.taila277ca.ts.net:8088/services/collector/event
+    SPLUNK_HEC_TOKEN =  REDACTED_SPLUNK_HEC_TOKEN
+    ───────────────────────────────────────────────────────────────────────────
+
+1c. Enable CORS on the Splunk HEC so the mobile browser can POST cross-origin.
+
+    Via Splunk Web:
+      Settings → Data Inputs → HTTP Event Collector → Global Settings
+        ☑ Enable SSL
+        ☑ Enable Cross-Origin Resource Sharing (CORS)
+        CORS origin:  *   (for POC; restrict to your AI Studio URL in production)
+      Save.
+
+    Via inputs.conf on brannigan (alternative):
+      sudo -u splunk bash -c "cat >> /opt/splunk/etc/system/local/inputs.conf <<'EOF'
+
+      [http]
+      enableSSL = 1
+      crossOriginPosting = 1
+      allowedOrigins = *
+      EOF"
+      sudo systemctl restart Splunkd
+
+1d. Verify the HEC token works from brannigan terminal:
+
+      curl -k https://127.0.0.1:8088/services/collector/event \
+        -H "Authorization: Splunk <YOUR_TOKEN>" \
+        -H "Content-Type: application/json" \
+        -d '{
+          "sourcetype": "pta:gps_location",
+          "index": "pta",
+          "event": {
+            "device_id": "test-device",
+            "lat": -31.9505,
+            "lon": 115.8605,
+            "accuracy": 10.0,
+            "altitude_m": 45.0,
+            "speed_kmh": 0,
+            "ts": "2026-06-22T10:00:00Z"
+          }
+        }'
+
+    Expected response:  {"text":"Success","code":0}
+
+1e. Confirm the test event landed in Splunk:
+
+    In Splunk Search:
+      index=pta sourcetype="pta:gps_location"
+      | table _time, device_id, lat, lon, accuracy
+
+    You should see the test row.
+
+
+================================================================================
+PART 2 — GOOGLE MAPS PLATFORM API KEY
+================================================================================
+
+2a. Open Google Cloud Console:
+      https://console.cloud.google.com
+
+2b. Create a new project (or use an existing one):
+      Top bar → project selector → NEW PROJECT
+        Project name:  PTA Splunk Dash
+      Click Create.
+
+2c. Enable the Maps JavaScript API:
+      Left menu → APIs & Services → Library
+      Search: "Maps JavaScript API"
+      Click it → Enable.
+
+2d. Create an API key:
+      Left menu → APIs & Services → Credentials
+      + CREATE CREDENTIALS → API key
+      A key is generated immediately — copy it.
+
+2e. (Recommended) Restrict the key to prevent misuse:
+      Click the key name → edit
+      Application restrictions → HTTP referrers (websites)
+      Add:
+        https://brannigan.taila277ca.ts.net:8000/*   (Splunk Web)
+        http://brannigan.taila277ca.ts.net:5000/*    (ICP Agent web app)
+        https://*.aistudio.google.com/*              (AI Studio preview)
+      API restrictions → Restrict key → Maps JavaScript API only.
+      Save.
+
+    ── YOUR VALUE ─────────────────────────────────────────────────────────────
+    GOOGLE_MAPS_PLATFORM_KEY  =  <key from step 2d>
+    ───────────────────────────────────────────────────────────────────────────
+
+
+================================================================================
+PART 3 — SPLUNK DASHBOARD: WIRE IN THE GOOGLE MAPS KEY
+================================================================================
+
+3a. Open  pta_gps_dashboard.xml  (in this project directory).
+
+3b. Find this line near the top of the <script> block:
+
+      var GOOGLE_MAPS_KEY = 'REPLACE_WITH_YOUR_GOOGLE_MAPS_PLATFORM_KEY';
+
+    Replace the placeholder with the key from Part 2.
+
+3c. Import the dashboard into Splunk:
+
+    Option A — via Splunk Web UI:
+      Settings → User Interface → Dashboards → Create New Dashboard
+        Title:  PTA GPS Tracker
+        Dashboard type: Classic (XML)
+      Click "Edit Source" → paste the entire contents of pta_gps_dashboard.xml
+      Save.
+
+    Option B — via REST API (faster):
+      # Replace YOUR_APP with "search" if you don't have a custom app
+      curl -k -u admin:$SPLUNK_PASSWORD \
+        -X POST https://127.0.0.1:8089/servicesNS/admin/search/data/ui/views \
+        -d "name=pta_gps_tracker" \
+        --data-urlencode "eai:data@pta_gps_dashboard.xml"
+
+    Option C — via filesystem:
+      sudo cp pta_gps_dashboard.xml \
+        /opt/splunk/etc/apps/search/local/data/ui/views/pta_gps_tracker.xml
+      sudo chown splunk:splunk \
+        /opt/splunk/etc/apps/search/local/data/ui/views/pta_gps_tracker.xml
+      # Touch a restart trigger:
+      curl -k -u admin:$SPLUNK_PASSWORD \
+        -X POST https://127.0.0.1:8089/services/server/control/restart
+
+3d. Open the dashboard:
+      http://brannigan.taila277ca.ts.net:8008/en-US/app/search/pta_gps_tracker
+
+    You should see the Google Map centred on Perth CBD and an empty
+    history table below. The map will update when GPS pings arrive.
+
+
+================================================================================
+PART 4 — MOBILE PHONE: TAILSCALE CONNECTIVITY
+================================================================================
+The phone needs to reach Splunk HEC (port 8088) on Brannigan.
+The cleanest way is to add the phone to your Tailnet — no port exposure needed.
+
+4a. Install Tailscale on the phone:
+      iOS:    App Store → Tailscale
+      Android: Play Store → Tailscale
+
+4b. Log in to your tailnet on the phone:
+      Open Tailscale app → Sign in → use the same account as Brannigan.
+
+4c. Approve the device in Tailscale admin:
+      https://login.tailscale.com/admin/machines
+
+4d. Confirm from the phone browser:
+      Navigate to: https://brannigan.taila277ca.ts.net:8088/services/collector/health
+      (Accept the self-signed cert warning.)
+      Expected:  {"text":"HEC is healthy","code":17}
+
+
+================================================================================
+PART 5 — GOOGLE AI STUDIO PWA: SET ENVIRONMENT VARIABLES
+================================================================================
+
+5a. Open your AI Studio project at:
+      https://aistudio.google.com
+
+5b. Navigate to project settings (gear icon or "Settings" in the sidebar).
+    Find the section labelled "Environment variables", "Secrets", or "API Keys".
+
+5c. Add the following three variables (use the values from Parts 1 and 2):
+
+      Variable name              Value
+      ─────────────────────────────────────────────────────────────────
+      SPLUNK_HEC_URL             https://brannigan.taila277ca.ts.net:8088/services/collector/event
+      SPLUNK_HEC_TOKEN           <your HEC token from Part 1b>
+      GOOGLE_MAPS_PLATFORM_KEY   <your Maps key from Part 2d>
+
+    NOTE: AI Studio marks these as "Secret" — they are injected at build time
+    and not exposed in the browser's page source.
+
+5d. In the PWA code, these are accessed as:
+      process.env.SPLUNK_HEC_URL
+      process.env.SPLUNK_HEC_TOKEN
+      process.env.GOOGLE_MAPS_PLATFORM_KEY
+
+    (or via import.meta.env.SPLUNK_HEC_URL if the build uses Vite)
+
+
+================================================================================
+PART 6 — MOBILE PWA: GPS SEND CODE
+================================================================================
+Add the following JavaScript to your Google AI Studio PWA.
+This is the "Send Location" button logic.
+
+---------- gps_sender.js (add to your PWA) ----------
+
+const HEC_URL   = process.env.SPLUNK_HEC_URL;
+const HEC_TOKEN = process.env.SPLUNK_HEC_TOKEN;
+
+// Call this function when the user taps "Send Location"
+async function sendLocationToSplunk() {
+  const statusEl = document.getElementById('gps-status');  // optional UI element
+
+  if (!navigator.geolocation) {
+    alert('Geolocation is not supported by this browser.');
+    return;
+  }
+
+  statusEl && (statusEl.textContent = 'Getting GPS fix...');
+
+  navigator.geolocation.getCurrentPosition(
+    async (position) => {
+      const { latitude, longitude, accuracy, altitude, speed, heading } = position.coords;
+
+      const payload = {
+        sourcetype: 'pta:gps_location',
+        index:      'pta',
+        event: {
+          device_id:   getDeviceId(),           // see helper below
+          lat:         latitude,
+          lon:         longitude,
+          accuracy:    accuracy,                 // metres
+          altitude_m:  altitude   ?? null,
+          speed_kmh:   speed != null ? (speed * 3.6).toFixed(1) : null,
+          heading:     heading     ?? null,
+          ts:          new Date().toISOString(),
+        }
+      };
+
+      try {
+        const res = await fetch(HEC_URL, {
+          method:  'POST',
+          headers: {
+            'Authorization': 'Splunk ' + HEC_TOKEN,
+            'Content-Type':  'application/json',
+          },
+          body: JSON.stringify(payload),
+        });
+
+        const data = await res.json();
+        if (data.code === 0) {
+          statusEl && (statusEl.textContent =
+            '✓ Sent  ' + latitude.toFixed(5) + ', ' + longitude.toFixed(5) +
+            '  (±' + accuracy.toFixed(0) + 'm)  @ ' + new Date().toLocaleTimeString());
+        } else {
+          statusEl && (statusEl.textContent = 'Splunk error: ' + data.text);
+        }
+      } catch (err) {
+        statusEl && (statusEl.textContent = 'Network error: ' + err.message);
+        console.error('HEC POST failed', err);
+      }
+    },
+    (error) => {
+      const msgs = {
+        1: 'Location permission denied — allow in browser settings.',
+        2: 'Position unavailable — try moving outdoors.',
+        3: 'GPS timed out — try again.',
+      };
+      statusEl && (statusEl.textContent = msgs[error.code] || 'GPS error ' + error.code);
+    },
+    {
+      enableHighAccuracy: true,
+      timeout:            10000,   // 10 second GPS fix deadline
+      maximumAge:         0,       // always get a fresh fix
+    }
+  );
+}
+
+// Stable per-device ID stored in localStorage
+function getDeviceId() {
+  let id = localStorage.getItem('pta_device_id');
+  if (!id) {
+    id = 'pta-' + Math.random().toString(36).slice(2, 8);
+    localStorage.setItem('pta_device_id', id);
+  }
+  return id;
+}
+
+---------- minimal HTML button to add to your PWA ----------
+
+<button onclick="sendLocationToSplunk()" style="
+  padding: 16px 32px; font-size: 18px; font-weight: bold;
+  background: #1a73e8; color: white; border: none; border-radius: 8px;
+  cursor: pointer; width: 100%;">
+  📍 Send My Location to Splunk
+</button>
+<p id="gps-status" style="font-family: monospace; font-size: 13px; color: #555;"></p>
+
+---------- end of GPS code ----------
+
+
+================================================================================
+PART 7 — END-TO-END TEST
+================================================================================
+
+7a. Open Splunk Search and run:
+      index=pta sourcetype="pta:gps_location"
+    (Leave the time window open — you'll see events arrive in real time.)
+
+7b. Open the PWA on the phone.
+    Tap "Send My Location to Splunk".
+    Grant location permission if prompted.
+
+7c. Status under the button should show:
+      ✓ Sent  -31.95xxx, 115.86xxx  (±12m)  @ 10:32:45 AM
+
+7d. In Splunk Search you should see a new row appear within a few seconds.
+
+7e. Open the PTA GPS Tracker dashboard:
+      http://brannigan.taila277ca.ts.net:8000/en-US/app/search/pta_gps_tracker
+
+    The map should centre on the phone's location with an info marker showing
+    coordinates, accuracy, and last-seen timestamp.
+    The map auto-refreshes every 15 seconds.
+
+7f. Verification checklist:
+    [ ] Splunk index "pta" exists and has events
+    [ ] HEC token test curl returns {"text":"Success","code":0}
+    [ ] CORS enabled on HEC (no browser CORS errors in phone DevTools)
+    [ ] Phone is on Tailscale and can reach HEC health endpoint
+    [ ] Google Maps key works (no "For development purposes only" watermark)
+    [ ] PWA "Send Location" button returns ✓ confirmation
+    [ ] Dashboard map shows correct coordinates on Google Maps
+    [ ] History table shows pings with accurate timestamps
+
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Problem: Browser shows CORS error on fetch to HEC
+  Fix:    Repeat step 1c — enable crossOriginPosting in Splunk HEC global settings.
+          Check browser DevTools Network tab for the preflight OPTIONS response.
+
+Problem: fetch returns "Failed to fetch" or net::ERR_CERT_AUTHORITY_INVALID
+  Fix:    The phone browser is rejecting Splunk's self-signed cert.
+          On the phone, visit https://brannigan.taila277ca.ts.net:8088 directly
+          and accept the cert exception. Then retry the PWA.
+          Long-term: install a proper TLS cert (Let's Encrypt via Tailscale HTTPS).
+
+Problem: GPS status shows "Location permission denied"
+  Fix:    On the phone: Settings → Browser → Location → Allow for this site.
+          PWAs require HTTPS to use geolocation — ensure the AI Studio preview
+          URL is served over HTTPS.
+
+Problem: Map shows "For development purposes only" watermark
+  Fix:    Billing is not enabled on the Google Cloud project.
+          Console → Billing → link a billing account.  Maps API is free under
+          ~28,000 loads/month — well within POC limits.
+
+Problem: Map stays on Perth default, no marker
+  Fix:    Open browser DevTools on the Splunk Web page (F12).
+          Check Console for JS errors.  Run the Splunk search manually:
+            index=pta sourcetype="pta:gps_location" | stats latest(lat) AS lat ...
+          If no results, GPS pings haven't landed yet.
+
+Problem: Dashboard "source not found" after XML import
+  Fix:    Check the view name: it must match the filename without extension.
+          In Splunk Web go to Settings → User Interface → Dashboards and confirm
+          "PTA GPS Tracker" appears in the list.
+
+Problem: AI Studio env vars not available at runtime
+  Fix:    Some AI Studio builds require env vars to be prefixed VITE_ or NEXT_PUBLIC_
+          to be exposed to browser code.  Check the AI Studio docs for your project
+          type, then prefix accordingly (e.g. VITE_SPLUNK_HEC_TOKEN).
+
+
+================================================================================
+SECURITY NOTES
+================================================================================
+  - The HEC token grants write-only access to Splunk (cannot read or admin).
+    Safe to embed in a PWA for POC; for production use a backend proxy.
+  - Restrict the Google Maps API key to your specific HTTP referrers (step 2e)
+    to prevent quota abuse.
+  - Enable billing alerts in Google Cloud Console so you get notified if
+    the key is ever misused.
+  - For production: set CORS origin to the specific AI Studio PWA URL rather
+    than wildcard (*).
+
+
+================================================================================
+END OF DOCUMENT
+================================================================================
