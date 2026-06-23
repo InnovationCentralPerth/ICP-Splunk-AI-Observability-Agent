@@ -4,7 +4,7 @@
 ================================================================================
 Project:   PTA Splunk Dash — Public Transport Authority GPS Tracker
 Server:    brannigan.taila277ca.ts.net  (Curtin ICP, Perth WA)
-Date:      2026-06-22
+Date:      2026-06-23
 Status:    WORKING ✓
 ================================================================================
 
@@ -14,8 +14,8 @@ CONCEPT
 A Google AI Studio Progressive Web App (PWA) installed on a mobile phone
 captures live GPS coordinates and transmits them to Splunk Enterprise via a
 secure FastAPI proxy running on Brannigan. A Google Maps dashboard — served
-by the same FastAPI server and embedded in a Splunk dashboard — shows the
-phone's real-time position updated every 15 seconds.
+by the same FastAPI server — shows the real-time position, full route trace,
+timestamped breadcrumb markers, and incident flags updated every 15 seconds.
 
 Key design decisions:
   • The phone and server share a Tailscale private network — no public
@@ -27,6 +27,8 @@ Key design decisions:
   • Tailscale provides a valid TLS certificate for the server hostname,
     resolving mixed-content browser blocks (AI Studio preview is HTTPS,
     so all fetch() calls must also be HTTPS).
+  • Incidents are flagged on the phone and sent as part of the normal GPS
+    telemetry payload — no separate server endpoint or data path required.
 
 
 ================================================================================
@@ -46,77 +48,40 @@ DATA FLOW
   │  │    POST https://brannigan.taila277ca.ts.net:5000/api/pta/telemetry│  │
   │  │    Content-Type: application/json                                │   │
   │  │    { latitude, longitude, accuracy, speed, heading,              │   │
-  │  │      timestamp (ms epoch), vehicleId }                           │   │
+  │  │      timestamp (ms epoch), vehicleId,                            │   │
+  │  │      incident?: true, incidentNote?: string }                    │   │
   │  └──────────────────────────────────────────────────────────────────┘   │
   └───────────────────────────────┬─────────────────────────────────────────┘
                                   │  HTTPS via Tailscale VPN
-                                  │  (tailscale cert — valid TLS, no warnings)
                                   ▼
   ┌─────────────────────────────────────────────────────────────────────────┐
   │  BRANNIGAN  (100.81.70.37 on Tailscale)                                 │
   │                                                                          │
-  │  ┌──────────────────────────────────────────────────────────────────┐   │
-  │  │  FastAPI / uvicorn  (icp-agent.service, port 5000, HTTPS)        │   │
-  │  │                                                                  │   │
-  │  │  POST /api/pta/telemetry                                         │   │
-  │  │    ↓ wraps payload:                                              │   │
-  │  │    { sourcetype: "pta:gps_location", index: "pta", event: {...} }│   │
-  │  │    ↓                                                             │   │
-  │  │  POST https://127.0.0.1:8088/services/collector/event            │   │
-  │  │    Authorization: Splunk REDACTED_SPLUNK_HEC_TOKEN   │   │
-  │  └──────────────────────────────────────────────────────────────────┘   │
-  │                          │                                               │
-  │                          ▼                                               │
-  │  ┌──────────────────────────────────────────────────────────────────┐   │
-  │  │  Splunk Enterprise 10.2.3                                        │   │
-  │  │                                                                  │   │
-  │  │  HEC  :8088  → token: pta_gps_feed                              │   │
-  │  │  Index: pta  │  Sourcetype: pta:gps_location                    │   │
-  │  │                                                                  │   │
-  │  │  Auto-extracts JSON fields from _raw:                            │   │
-  │  │    latitude, longitude, accuracy, speed, heading,                │   │
-  │  │    timestamp, vehicleId                                          │   │
-  │  └──────────────────────────────────────────────────────────────────┘   │
-  │                          │                                               │
-  │           ┌──────────────┘                                               │
-  │           ▼                                                              │
-  │  ┌──────────────────────────────────────────────────────────────────┐   │
-  │  │  GET /api/pta/gps  (FastAPI — polls Splunk every request)        │   │
-  │  │                                                                  │   │
-  │  │  SPL: search index=pta sourcetype="pta:gps_location"            │   │
-  │  │       | stats latest(latitude)  AS lat                          │   │
-  │  │               latest(longitude) AS lon                          │   │
-  │  │               latest(accuracy)  AS accuracy                     │   │
-  │  │               latest(speed)     AS speed_ms                     │   │
-  │  │               latest(heading)   AS heading                      │   │
-  │  │               latest(_time)     AS ts                           │   │
-  │  │             BY vehicleId                                        │   │
-  │  │       | sort -ts | head 1                                       │   │
-  │  │                                                                  │   │
-  │  │  Returns JSON: { found, device_id, lat, lon, accuracy,          │   │
-  │  │                  speed_kmh (×3.6), heading, ts }                │   │
-  │  └──────────────────────────────────────────────────────────────────┘   │
-  │                          │                                               │
-  │                          ▼                                               │
-  │  ┌──────────────────────────────────────────────────────────────────┐   │
-  │  │  GET /pta  (FastAPI — Google Maps HTML page)                     │   │
-  │  │                                                                  │   │
-  │  │  • Polls /api/pta/gps every 15 seconds                          │   │
-  │  │  • Plots bus marker at latest lat/lon                            │   │
-  │  │  • Info window: vehicleId, coords, accuracy, speed, heading      │   │
-  │  │  • Google Maps JS API key embedded server-side                   │   │
-  │  └──────────────────────────────────────────────────────────────────┘   │
+  │  FastAPI / uvicorn  (icp-agent.service, port 5000, HTTPS)               │
+  │                                                                          │
+  │  POST /api/pta/telemetry  →  Splunk HEC :8088  (pta:gps_location)       │
+  │  GET  /api/pta/gps        →  Splunk mgmt :8089  (latest fix, all-time)  │
+  │  GET  /api/pta/gps/history→  Splunk mgmt :8089  (filtered breadcrumbs)  │
+  │  GET  /api/pta/gps/route  →  Splunk mgmt :8089  (all raw points)        │
+  │  POST /api/pta/reset      →  Splunk mgmt :8089  (| delete all events)   │
+  │  GET  /pta                →  Google Maps HTML page                       │
+  │                                                                          │
+  │  Splunk Enterprise 10.2.3                                                │
+  │    Index: pta  │  Sourcetype: pta:gps_location                          │
+  │    HEC token:  pta_gps_feed                                              │
   └─────────────────────────────────────────────────────────────────────────┘
                                   │
                                   ▼
   ┌─────────────────────────────────────────────────────────────────────────┐
-  │  BROWSER / DASHBOARD                                                     │
+  │  BROWSER — https://brannigan.taila277ca.ts.net:5000/pta                  │
   │                                                                          │
-  │  https://brannigan.taila277ca.ts.net:5000/pta                           │
-  │    Standalone Google Maps page — works on any Tailscale device           │
-  │                                                                          │
-  │  http://brannigan.taila277ca.ts.net:8008/en-US/app/search/pta_gps_tracker
-  │    Splunk dashboard — map (iframe) + ping history table + daily count    │
+  │  Yellow polyline     — all raw GPS points (full route trace)            │
+  │  Cyan dot markers    — filtered breadcrumbs (≥1 min, ≥25 m apart)       │
+  │                        with HH:MM timestamp (+8 GMT) label              │
+  │  Orange triangle     — incident-flagged GPS point                        │
+  │                        INC-MMDD-HHmmSS ID, clickable for details        │
+  │  Bus marker          — latest known GPS position (all-time)             │
+  │  RESET button        — deletes all pta:gps_location events from Splunk  │
   └─────────────────────────────────────────────────────────────────────────┘
 
 
@@ -136,7 +101,7 @@ COMPONENT DETAILS
   Vehicle ID:  Generated once as VHL-XXXX, stored in localStorage.
                User can change it in Settings (not while tracking).
 
-  Payload sent to server:
+  Standard payload sent to server:
     {
       latitude:  number,      // decimal degrees
       longitude: number,      // decimal degrees
@@ -146,6 +111,21 @@ COMPONENT DETAILS
       timestamp: number,      // Date.now() — milliseconds epoch
       vehicleId: string       // e.g. "VHL-0042" or "STAN-PHONE"
     }
+
+  Incident payload (additional fields, only present when flagged):
+    {
+      ...standard fields...,
+      incident:     true,     // boolean — omitted on normal pings
+      incidentNote: string    // optional free-text description
+    }
+
+  Incident flag flow in app.tsx:
+    • State: isIncident (boolean, default false), incidentNote (string)
+    • "Mark Incident" button sets isIncident = true
+    • On next GPS send: incident + incidentNote are spread into payload
+    • Flag auto-clears after send so subsequent pings are normal again
+    • Spread pattern: ...(isIncident && { incident: true })
+                      ...(isIncident && incidentNote && { incidentNote: ... })
 
   Endpoint:  https://brannigan.taila277ca.ts.net:5000/api/pta/telemetry
   Method:    POST, Content-Type: application/json
@@ -163,13 +143,6 @@ COMPONENT DETAILS
     must also be HTTPS. Tailscale cert resolves this without self-signed
     certificate warnings.
 
-  transmitToSplunk function (key change from original):
-    // Original (broken — goes to Google Cloud, cannot reach Tailscale):
-    fetch('/api/telemetry', { ... })
-
-    // Fixed (direct to Brannigan via Tailscale, HTTPS):
-    fetch('https://brannigan.taila277ca.ts.net:5000/api/pta/telemetry', { ... })
-
 
 ── 2. TAILSCALE ───────────────────────────────────────────────────────────────
 
@@ -186,7 +159,7 @@ COMPONENT DETAILS
       curl https://brannigan.taila277ca.ts.net:5000/api/pta/gps
 
 
-── 3. FASTAPI PROXY  (icp_observability_agent.py) ─────────────────────────────
+── 3. FASTAPI  (icp_observability_agent.py) ───────────────────────────────────
 
   Service:     icp-agent.service  (systemd)
   Port:        5000  (HTTPS)
@@ -194,30 +167,111 @@ COMPONENT DETAILS
   SSL key:     /etc/ssl/icp/brannigan.taila277ca.ts.net.key
   CORS:        CORSMiddleware — allow_origins=["*"]
 
-  Endpoints added for PTA:
+  ── POST /api/pta/telemetry ──────────────────────────────────────────────────
+  Receives phone GPS payload (including optional incident fields), wraps in
+  Splunk HEC envelope, forwards unchanged.
+  HEC token: _PTA_HEC_TOKEN (env: PTA_HEC_TOKEN)
+  Splunk envelope:
+    { "sourcetype": "pta:gps_location", "index": "pta", "event": <payload> }
+  Returns: { "status": "ok", "splunk": { "text": "Success", "code": 0 } }
 
-  POST /api/pta/telemetry
-    Receives phone GPS payload, wraps in Splunk HEC envelope, forwards.
-    HEC token used: _PTA_HEC_TOKEN = "REDACTED_SPLUNK_HEC_TOKEN"
-    Splunk envelope:
-      { "sourcetype": "pta:gps_location", "index": "pta", "event": <payload> }
-    Returns: { "status": "ok", "splunk": { "text": "Success", "code": 0 } }
+  ── GET /api/pta/gps ─────────────────────────────────────────────────────────
+  Returns the most recent GPS fix for any vehicle across ALL time
+  (not limited to recent window — shows last known position even if idle).
+  SPL:
+    search index=pta sourcetype="pta:gps_location"
+    | stats latest(latitude) AS lat latest(longitude) AS lon
+            latest(accuracy) AS accuracy latest(speed) AS speed_ms
+            latest(heading) AS heading latest(_time) AS ts BY vehicleId
+    | sort -ts | head 1
+  earliest_time: 0 (all time)
+  Returns: { found, device_id, lat, lon, accuracy, speed_kmh, heading, ts }
+  Note: speed converted m/s → km/h (×3.6)
 
-  GET /api/pta/gps
-    Queries Splunk management API for latest GPS fix.
-    Splunk user: icp / icp12345  (port 8089)
-    Returns most recently seen vehicle (sorted by _time descending).
-    Converts speed from m/s → km/h (× 3.6).
-    Returns: { found, device_id, lat, lon, accuracy, speed_kmh, heading, ts }
+  ── GET /api/pta/gps/history ─────────────────────────────────────────────────
+  Returns filtered GPS breadcrumbs across all time.
+  Filter: keep a point only if BOTH conditions met vs. previous kept point:
+    • ≥60 seconds elapsed
+    • ≥25 metres moved (haversine distance)
+  Exception: incident-flagged points always included regardless of filter.
+  SPL:
+    search index=pta sourcetype="pta:gps_location" earliest=0 latest=now
+    | eval ts=_time
+    | fields ts latitude longitude incident incidentNote
+    | sort 0 ts
+  Server-side haversine filtering applied after query.
+  Returns: { points: [{lat, lon, ts, incident, incidentNote}] }
 
-  GET /pta
-    Returns full Google Maps HTML page.
-    Polls /api/pta/gps every 15 seconds.
-    Renders bus marker with info window at latest GPS position.
-    Google Maps API key: REDACTED_GOOGLE_MAPS_API_KEY
+  ── GET /api/pta/gps/route ───────────────────────────────────────────────────
+  Returns ALL raw GPS points across all time, unfiltered, for drawing the
+  yellow route polyline on the map.
+  SPL:
+    search index=pta sourcetype="pta:gps_location" earliest=0 latest=now
+    | eval ts=_time
+    | fields ts latitude longitude
+    | sort 0 ts
+  Returns: { points: [{lat, lon, ts}] }
+
+  ── POST /api/pta/reset ──────────────────────────────────────────────────────
+  Deletes all pta:gps_location events from Splunk permanently.
+  SPL: search index=pta sourcetype="pta:gps_location" earliest=0 latest=now
+       | delete
+  Uses: Splunk management API /services/search/jobs (exec_mode=oneshot)
+  Requires: can_delete capability (see Splunk Permission Fix below)
+  Returns: { "status": "ok", "message": "GPS tracking history cleared" }
+
+  ── GET /pta ─────────────────────────────────────────────────────────────────
+  Full Google Maps HTML page served from FastAPI.
+  On load:
+    1. loadRoute()   — fetches /api/pta/gps/route, draws yellow polyline
+    2. loadHistory() — fetches /api/pta/gps/history, places markers
+    3. poll()        — fetches /api/pta/gps, moves live bus marker
+  Refresh intervals:
+    poll():        every 15 seconds
+    loadRoute():   every 60 seconds
+    loadHistory(): every 60 seconds
+  Map auto-centres on latest history point if no live ping is active.
 
 
-── 4. SPLUNK ENTERPRISE ───────────────────────────────────────────────────────
+── 4. MAP VISUALISATION ───────────────────────────────────────────────────────
+
+  Yellow polyline:
+    Source: /api/pta/gps/route (all raw points)
+    Style:  strokeColor #FFD700, opacity 0.75, weight 3, zIndex 0
+    Drawn behind all markers.
+
+  Cyan dot markers (GPS breadcrumbs):
+    Source: /api/pta/gps/history (filtered, non-incident points)
+    Icon:   Inline SVG — 8px cyan circle + dark pill with HH:MM (+8 GMT)
+    Time format: UTC+8 Perth time derived from epoch: ts + 8*3600 as UTC
+    zIndex: 1
+
+  Orange triangle markers (incidents):
+    Source: /api/pta/gps/history (incident=true points)
+    Icon:   Inline SVG — orange triangle with "!" + ID label
+    ID:     INC-MMDD-HHmmSS (derived from UTC+8 timestamp on the client)
+    Click:  InfoWindow shows ID, time, optional note, STATUS: OPEN
+    zIndex: 5 (above route and breadcrumbs)
+
+  Bus marker (live position):
+    Source: /api/pta/gps (latest GPS fix)
+    Icon:   maps.google.com/mapfiles/ms/icons/bus.png
+    Click:  InfoWindow shows vehicleId, lat, lon, accuracy, speed, heading
+    zIndex: 10 (always on top)
+    Hidden until first valid GPS response.
+
+  RESET button:
+    Styled: red border/text, fills red on hover
+    Action: confirms → POST /api/pta/reset → clears polyline + all markers
+            + hides live bus marker
+
+  Incident ID format:
+    Generated client-side from event timestamp: INC-MMDD-HHmmSS
+    e.g. INC-0623-143022 = 23 June, 14:30:22 Perth time
+    Human-readable, unique to the second, no server ID generation required.
+
+
+── 5. SPLUNK ENTERPRISE ───────────────────────────────────────────────────────
 
   Version:     10.2.3
   Web port:    8008  (not default 8000)
@@ -229,22 +283,27 @@ COMPONENT DETAILS
                Path: /opt/splunk/var/lib/splunk/pta/
 
   HEC Input:   pta_gps_feed
-               Token: REDACTED_SPLUNK_HEC_TOKEN
+               Token: (see .env — PTA_HEC_TOKEN)
                Default sourcetype: pta:gps_location
                Default index: pta
 
   Sourcetype:  pta:gps_location
                JSON auto-extraction enabled by default (no props.conf needed)
-               Fields: latitude, longitude, accuracy, speed, heading,
-                       timestamp, vehicleId
+               Standard fields: latitude, longitude, accuracy, speed, heading,
+                                 timestamp, vehicleId
+               Incident fields:  incident (bool), incidentNote (string)
+                                 — present only on incident-flagged pings
 
-  CORS:        Configured in /opt/splunk/etc/system/local/inputs.conf
-               [http]
-               enableSSL = 1
-               crossOriginPosting = 1
-               allowedOrigins = *
-               Note: Splunk 10.x CORS headers were unreliable for direct
-               browser → HEC calls; FastAPI proxy is the preferred path.
+  Splunk User: icp (role: admin)
+               Mgmt API: https://127.0.0.1:8089  icp / icp12345
+
+  Permission fix for | delete:
+    By default, Splunk admin role does NOT have can_delete capability.
+    Fixed by creating /opt/splunk/etc/system/local/authorize.conf:
+      [role_admin]
+      importRoles = power;user;can_delete
+    Requires Splunk restart to take effect.
+    (can_delete is in role_can_delete which has delete_by_keyword = enabled)
 
   Dashboard:   pta_gps_tracker  (sharing: app, namespace: nobody/search)
                URL: http://brannigan.taila277ca.ts.net:8008/en-US/app/search/pta_gps_tracker
@@ -262,25 +321,19 @@ COMPONENT DETAILS
     | sort -time | head 30
 
 
-── 5. GOOGLE MAPS ─────────────────────────────────────────────────────────────
+── 6. GOOGLE MAPS ─────────────────────────────────────────────────────────────
 
   API:         Maps JavaScript API
-  Key:         REDACTED_GOOGLE_MAPS_API_KEY
-  Project:     PTA Splunk Dash  (Google Cloud Console)
-  Restriction: HTTP referrers — brannigan.taila277ca.ts.net
-
+  Key:         (see .env — PTA_MAPS_KEY)
   Map config:  Default centre: Perth CBD (-31.9505, 115.8605)
                Default zoom: 14
-               Marker icon: bus.png (Google Maps standard)
-               Info window fields: vehicleId, lat, lon, accuracy,
-                                   speed (km/h), heading (compass + degrees),
-                                   last seen (local time)
 
   Heading display:  Converted to compass bearing
     ['N','NE','E','SE','S','SW','W','NW'][Math.round(deg/45) % 8] + deg°
 
-  Refresh:     15-second poll of /api/pta/gps
-               Map re-centres and moves marker on each update
+  All marker icons use inline SVG encoded as data URIs — no external icon
+  hosting required. Anchor points set so the visual dot/tip aligns exactly
+  with the GPS coordinate.
 
 
 ================================================================================
@@ -302,7 +355,6 @@ LESSONS LEARNED / GOTCHAS
 3. SPLUNK HTML PANEL CSP (Splunk 10.x)
    SimpleXML encoded="0" HTML panels do not execute inline JavaScript
    in Splunk 10.x due to Content Security Policy restrictions.
-   The raw HTML/JS is rendered as escaped text.
    Fix: Serve the map from FastAPI and embed via encoded="1" iframe.
 
 4. SPLUNK WEB PORT IS 8008 (not 8000)
@@ -315,8 +367,8 @@ LESSONS LEARNED / GOTCHAS
 
 6. WRONG HEC TOKEN
    The existing .env had SPLUNK_HEC_TOKEN pointing to the meraki-switch
-   HEC input. A dedicated pta_gps_feed token was created and hardcoded
-   as _PTA_HEC_TOKEN in the FastAPI code to keep the data sources clean.
+   HEC input. A dedicated pta_gps_feed token was created and stored as
+   PTA_HEC_TOKEN in .env to keep the data sources clean.
 
 7. DASHBOARD SHARING
    Dashboards created via REST API default to user-level sharing (private).
@@ -336,9 +388,45 @@ LESSONS LEARNED / GOTCHAS
     not the IP (100.81.70.37). Using the IP with HTTPS causes cert mismatch.
     Always use the full hostname in URLs.
 
+11. SPLUNK _time IS A FORMATTED STRING IN EXPORT API
+    When querying via /services/search/jobs/export with output_mode=json,
+    the _time field comes back as a formatted string e.g.
+    "2026-06-22 14:19:42.000 AWST" — NOT an epoch number.
+    float("2026-06-22...") throws ValueError, silently caught, returns nothing.
+    Fix: add `| eval ts=_time` in the SPL BEFORE `| fields ...`
+    In eval context, _time IS the epoch float. Use `ts` as the field name.
+
+12. SPLUNK can_delete NOT IN DEFAULT ADMIN ROLE
+    The `| delete` search command requires the can_delete capability.
+    This is NOT granted to the admin role by default in Splunk — by design.
+    The REST API returns HTTP 200 with a FATAL message in the JSON body,
+    NOT a non-2xx status code. resp.ok is True even on failure.
+    Fix: Create /opt/splunk/etc/system/local/authorize.conf with:
+      [role_admin]
+      importRoles = power;user;can_delete
+    Then restart Splunk. The role_can_delete role has delete_by_keyword which
+    grants the | delete command. Restart required for conf changes to apply.
+
+13. GPS ENDPOINT TIME WINDOW
+    Originally the /api/pta/gps endpoint used earliest_time=-1h.
+    If the tracker has been idle >1 hour, it returns found:false even though
+    Splunk has valid historical data. The map shows "No GPS pings yet" and
+    stays at default Perth CBD centre, hiding all history markers off-screen.
+    Fix: Set earliest_time=0 (all time). The SPL `| head 1` ensures only
+    the single most recent result is returned regardless of data volume.
+
+14. INCIDENT FLAG — SINGLE TELEMETRY PATH
+    Sending incidents as a separate API call or sourcetype adds complexity
+    with no benefit. The cleanest design: the phone app adds incident=true
+    and incidentNote fields to the standard GPS telemetry payload.
+    The server proxy forwards unchanged. Splunk stores everything in
+    pta:gps_location. History endpoint surfaces the incident field.
+    Incident ID is derived client-side from the GPS timestamp — no
+    server-side ID generation or separate event creation required.
+
 
 ================================================================================
-QUICK REFERENCE — URLS & CREDENTIALS
+QUICK REFERENCE — URLS & ENDPOINTS
 ================================================================================
 
   Live map (standalone):
@@ -350,11 +438,17 @@ QUICK REFERENCE — URLS & CREDENTIALS
   Telemetry endpoint (phone → server):
     POST https://brannigan.taila277ca.ts.net:5000/api/pta/telemetry
 
-  GPS data API (server → Splunk query):
+  Latest GPS fix:
     GET  https://brannigan.taila277ca.ts.net:5000/api/pta/gps
 
-  Splunk HEC token (pta_gps_feed):
-    REDACTED_SPLUNK_HEC_TOKEN
+  Filtered breadcrumbs (≥1 min, ≥25 m) + incidents:
+    GET  https://brannigan.taila277ca.ts.net:5000/api/pta/gps/history
+
+  All raw GPS points (for route polyline):
+    GET  https://brannigan.taila277ca.ts.net:5000/api/pta/gps/route
+
+  Delete all GPS history:
+    POST https://brannigan.taila277ca.ts.net:5000/api/pta/reset
 
   Splunk index:
     pta  /  sourcetype: pta:gps_location
@@ -362,8 +456,8 @@ QUICK REFERENCE — URLS & CREDENTIALS
   Splunk login:
     http://brannigan.taila277ca.ts.net:8008  —  icp / icp12345
 
-  Google Maps API key:
-    REDACTED_GOOGLE_MAPS_API_KEY
+  Splunk permission file:
+    /opt/splunk/etc/system/local/authorize.conf
 
   TLS cert location (Brannigan):
     /etc/ssl/icp/brannigan.taila277ca.ts.net.crt
@@ -375,14 +469,29 @@ QUICK REFERENCE — URLS & CREDENTIALS
 MANUAL TEST (Termux / any curl client on Tailscale)
 ================================================================================
 
-  # Send a GPS ping:
+  # Send a normal GPS ping:
   curl -X POST https://brannigan.taila277ca.ts.net:5000/api/pta/telemetry \
     -H "Content-Type: application/json" \
-    -d "{\"latitude\":-32.007698,\"longitude\":115.894151,\"accuracy\":5,\
-\"speed\":0,\"heading\":0,\"timestamp\":$(date +%s)000,\"vehicleId\":\"STAN-PHONE\"}"
+    -d '{"latitude":-32.007698,"longitude":115.894151,"accuracy":5,
+         "speed":0,"heading":0,"timestamp":'"$(date +%s)"'000,
+         "vehicleId":"STAN-PHONE"}'
+
+  # Send an incident-flagged GPS ping:
+  curl -X POST https://brannigan.taila277ca.ts.net:5000/api/pta/telemetry \
+    -H "Content-Type: application/json" \
+    -d '{"latitude":-32.007698,"longitude":115.894151,"accuracy":5,
+         "speed":0,"heading":0,"timestamp":'"$(date +%s)"'000,
+         "vehicleId":"STAN-PHONE",
+         "incident":true,"incidentNote":"Test incident"}'
 
   # Check latest position:
   curl https://brannigan.taila277ca.ts.net:5000/api/pta/gps
+
+  # Check breadcrumbs + incidents:
+  curl https://brannigan.taila277ca.ts.net:5000/api/pta/gps/history
+
+  # Check raw route points:
+  curl https://brannigan.taila277ca.ts.net:5000/api/pta/gps/route
 
   # Verify in Splunk:
   index=pta sourcetype="pta:gps_location" | sort -_time | head 5

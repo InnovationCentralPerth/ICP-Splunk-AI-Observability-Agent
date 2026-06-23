@@ -52,6 +52,7 @@ Cisco Meraki Hardware
 - **Bidirectional Splunk loop** — data INTO Splunk via HEC, AI results OUT to drive LLM context and automated responses back IN — Splunk is the AI brain, not just a log sink
 - **[Clear] controls** — one-click clear buttons on Active Anomalies and Automated Responses panels
 - **In-application LLM model switching** — GPT-4o mini (analyst), Llama 3.3 70B (chat composer), Gemini Flash 2.0 (fallback) — demonstrates multi-model AI routing
+- **PTA GPS Tracker** — phone app sends live GPS + incident flags to FastAPI → Splunk HEC; Google Maps page at `/pta` shows live bus position, yellow route polyline (all raw points), cyan breadcrumb markers (UTC+8 timestamps, ≥1 min/≥25 m filter), and orange incident triangle markers with auto-generated INC-MMDD-HHmmSS IDs; RESET button clears all Splunk history via `| delete`
 - **Natural language chat** — every LLM response explicitly cites Splunk AI findings
 - **Historical trend charts** — sensor tiles open 12-hour Chart.js graphs from Splunk `timechart` queries; camera AI tiles open 24h occupancy timelines with anomaly markers
 - **FastAPI web UI** — live sensor tiles, camera AI panel, automated responses panel, NL chat interface
@@ -213,6 +214,7 @@ sudo journalctl -u icp-agent -f
 | `icp:camera_ml_anomaly` | Camera AI anomalies: crowd surge, thermal correlations |
 | `icp:anomaly` | All threshold and cross-signal anomaly events |
 | `icp:automated_response` | AI-generated incident reports + Splunk alert creation events |
+| `pta:gps_location` | PTA GPS tracker: latitude, longitude, accuracy, speed, heading, vehicleId; incident-flagged pings include `incident=true` and `incidentNote` fields |
 
 ---
 
@@ -228,6 +230,12 @@ sudo journalctl -u icp-agent -f
 | `GET /api/camera/history` | 24h per-camera occupancy + entrances + ML anomaly markers |
 | `POST /api/clear/anomalies` | Clear the active anomalies list |
 | `POST /api/clear/responses` | Clear the automated responses list |
+| `GET /pta` | PTA GPS Tracker map — live position, route polyline, breadcrumbs, incidents |
+| `POST /api/pta/telemetry` | Receive phone GPS payload (+ optional incident flag) → forward to Splunk HEC |
+| `GET /api/pta/gps` | Latest GPS fix for any vehicle (all-time search) |
+| `GET /api/pta/gps/history` | Filtered breadcrumbs (≥1 min, ≥25 m) + all incident markers |
+| `GET /api/pta/gps/route` | All raw GPS points for route polyline (unfiltered) |
+| `POST /api/pta/reset` | Delete all `pta:gps_location` events from Splunk via `\| delete` |
 
 ---
 
@@ -290,6 +298,9 @@ icp_building_sensor_dashboard.xml          # Splunk dashboard XML for sensor dat
 icp_sw01_dashboard.xml                     # Splunk dashboard XML for switch data
 splunk_meraki_dashboard_setup.md           # Detailed Splunk setup guide
 MV12W_kitchen.py              # Reference: standalone 24h camera history terminal viewer
+pta_gps_dashboard.xml         # Splunk dashboard: PTA GPS tracker map iframe + ping history
+Phone-App-GPS-Splunk.txt      # PTA GPS tracker — integration reference, API, gotchas
+PTA-Splunk-Dash-Setup.txt     # PTA GPS tracker — step-by-step setup guide
 ```
 
 ---
