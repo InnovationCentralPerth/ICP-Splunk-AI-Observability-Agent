@@ -38,6 +38,7 @@ Usage:
 
 import os
 import json
+import math
 import time
 import threading
 import urllib3
@@ -1268,6 +1269,7 @@ async def get_narrative():
 _PTA_MAPS_KEY   = os.getenv("PTA_MAPS_KEY", "")
 _PTA_HEC_TOKEN  = os.getenv("PTA_HEC_TOKEN", "")
 
+
 @app.post("/api/pta/telemetry")
 async def pta_telemetry(payload: dict):
     """Proxy GPS telemetry from the phone app to Splunk HEC (keeps HEC token server-side)."""
@@ -1332,6 +1334,94 @@ async def get_pta_gps():
     return {"found": False}
 
 
+def _haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6_371_000
+    φ1, φ2 = math.radians(lat1), math.radians(lat2)
+    Δφ = math.radians(lat2 - lat1)
+    Δλ = math.radians(lon2 - lon1)
+    a = math.sin(Δφ / 2) ** 2 + math.cos(φ1) * math.cos(φ2) * math.sin(Δλ / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+@app.get("/api/pta/gps/history")
+async def get_pta_gps_history():
+    """Return GPS breadcrumbs filtered to >=1 min apart and >=25 m moved."""
+    # | eval ts=_time converts internal _time (formatted string) to epoch float
+    # incident + incidentNote are optional fields set by the phone app
+    spl = (
+        'search index=pta sourcetype="pta:gps_location" earliest=0 latest=now '
+        '| eval ts=_time '
+        '| fields ts latitude longitude incident incidentNote '
+        '| sort 0 ts'
+    )
+    try:
+        resp = requests.post(
+            f"{SPLUNK_MGMT_URL}/services/search/jobs/export",
+            auth=(SPLUNK_USERNAME, SPLUNK_PASSWORD),
+            data={"search": spl, "output_mode": "json",
+                  "exec_mode": "oneshot", "earliest_time": "0", "latest_time": "now"},
+            verify=False, timeout=30,
+        )
+        raw: list[dict] = []
+        for line in resp.text.strip().split("\n"):
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line.strip())
+                if "result" in obj:
+                    r = obj["result"]
+                    lat, lon, ts = r.get("latitude"), r.get("longitude"), r.get("ts")
+                    if lat and lon and ts:
+                        inc_raw = r.get("incident")
+                        raw.append({
+                            "lat": float(lat),
+                            "lon": float(lon),
+                            "ts": float(ts),
+                            "incident": str(inc_raw).lower() in ("true", "1", "yes") if inc_raw else False,
+                            "incidentNote": r.get("incidentNote", ""),
+                        })
+            except Exception:
+                pass
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Incident points always appear; regular breadcrumbs require >=1 min gap AND >=25 m moved
+    filtered: list[dict] = []
+    last_crumb: dict | None = None
+    for p in raw:
+        if p["incident"]:
+            filtered.append(p)
+            continue
+        if last_crumb is None:
+            filtered.append(p)
+            last_crumb = p
+            continue
+        if (p["ts"] - last_crumb["ts"] >= 60 and
+                _haversine_m(last_crumb["lat"], last_crumb["lon"], p["lat"], p["lon"]) >= 25):
+            filtered.append(p)
+            last_crumb = p
+
+    return {"points": filtered}
+
+
+@app.post("/api/pta/reset")
+async def reset_pta_gps():
+    """Delete all GPS events from the pta Splunk index."""
+    spl = 'search index=pta sourcetype="pta:gps_location" earliest=0 latest=now | delete'
+    try:
+        resp = requests.post(
+            f"{SPLUNK_MGMT_URL}/services/search/jobs",
+            auth=(SPLUNK_USERNAME, SPLUNK_PASSWORD),
+            data={"search": spl, "output_mode": "json", "exec_mode": "oneshot"},
+            verify=False, timeout=30,
+        )
+        if resp.ok:
+            return {"status": "ok", "message": "GPS tracking history cleared"}
+        raise HTTPException(status_code=502, detail=resp.text)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
 _PTA_MAP_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1347,6 +1437,10 @@ _PTA_MAP_HTML = """<!DOCTYPE html>
          padding: 10px 16px; display: flex; align-items: center; gap: 12px; }
   #hdr h1 { font-size: 16px; font-weight: 600; }
   #hdr span { font-size: 12px; color: #8b949e; margin-left: auto; }
+  #resetBtn { background: #21262d; border: 1px solid #f85149; color: #f85149;
+              border-radius: 6px; padding: 5px 12px; font-size: 12px; font-weight: 600;
+              cursor: pointer; letter-spacing: 0.5px; }
+  #resetBtn:hover { background: #f85149; color: #fff; }
   #status { font-family: monospace; font-size: 13px; padding: 8px 16px;
             background: #0d1117; color: #00d4ff; border-bottom: 1px solid #21262d; }
   #map { flex: 1; width: 100%; min-height: 420px; }
@@ -1355,6 +1449,7 @@ _PTA_MAP_HTML = """<!DOCTYPE html>
 <body>
 <div id="hdr">
   <h1>PTA GPS Tracker</h1>
+  <button id="resetBtn">RESET</button>
   <span id="ts">Connecting...</span>
 </div>
 <div id="status">Waiting for GPS data from mobile app...</div>
@@ -1362,27 +1457,148 @@ _PTA_MAP_HTML = """<!DOCTYPE html>
 <script>
 var REFRESH = 15000;
 var map, marker, info;
+var routeMarkers = [];
+
 window.initPTAMap = function () {
-  map    = new google.maps.Map(document.getElementById('map'), {
-             zoom: 14, center: {lat: -31.9505, lng: 115.8605},
-             mapTypeId: 'roadmap', streetViewControl: false });
-  marker = new google.maps.Marker({ map: map, title: 'PTA Device',
-             icon: 'https://maps.google.com/mapfiles/ms/icons/bus.png' });
-  info   = new google.maps.InfoWindow();
-  poll(); setInterval(poll, REFRESH);
+  map = new google.maps.Map(document.getElementById('map'), {
+    zoom: 14, center: {lat: -31.9505, lng: 115.8605},
+    mapTypeId: 'roadmap', streetViewControl: false
+  });
+  marker = new google.maps.Marker({
+    map: map, title: 'PTA Device',
+    icon: 'https://maps.google.com/mapfiles/ms/icons/bus.png',
+    visible: false, zIndex: 10
+  });
+  info = new google.maps.InfoWindow();
+  loadHistory();
+  poll();
+  setInterval(poll, REFRESH);
+  setInterval(loadHistory, REFRESH * 4);
+
+  document.getElementById('resetBtn').addEventListener('click', function () {
+    if (!confirm('Delete ALL GPS tracking history from Splunk? This cannot be undone.')) return;
+    fetch('/api/pta/reset', {method: 'POST'})
+      .then(function (r) { return r.json(); })
+      .then(function () {
+        clearRoute();
+        marker.setVisible(false);
+        info.close();
+        document.getElementById('status').textContent = 'Tracking history cleared.';
+        document.getElementById('ts').textContent = 'Reset at ' + new Date().toLocaleTimeString();
+      })
+      .catch(function (e) { alert('Reset failed: ' + e.message); });
+  });
 };
+
+function clearRoute() {
+  routeMarkers.forEach(function (m) { m.setMap(null); });
+  routeMarkers = [];
+}
+
+function formatUTC8(ts) {
+  var d = new Date((ts + 8 * 3600) * 1000);
+  var h = d.getUTCHours().toString().padStart(2, '0');
+  var m = d.getUTCMinutes().toString().padStart(2, '0');
+  return h + ':' + m;
+}
+
+function formatIncidentId(ts) {
+  var d = new Date((ts + 8 * 3600) * 1000);
+  var mo = (d.getUTCMonth() + 1).toString().padStart(2, '0');
+  var dy = d.getUTCDate().toString().padStart(2, '0');
+  var h  = d.getUTCHours().toString().padStart(2, '0');
+  var mi = d.getUTCMinutes().toString().padStart(2, '0');
+  var s  = d.getUTCSeconds().toString().padStart(2, '0');
+  return 'INC-' + mo + dy + '-' + h + mi + s;
+}
+
+function makeRouteIcon(timeStr) {
+  var tw = timeStr.length * 7 + 8;
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + (tw + 14) + '" height="18">' +
+    '<circle cx="5" cy="9" r="4" fill="#00d4ff" stroke="#0d1117" stroke-width="1.5"/>' +
+    '<rect x="12" y="1" width="' + tw + '" height="16" rx="3" fill="rgba(13,17,23,0.82)"/>' +
+    '<text x="16" y="13" font-family="monospace" font-size="10" fill="#00d4ff">' + timeStr + '</text>' +
+    '</svg>';
+  return {
+    url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg),
+    anchor: new google.maps.Point(5, 9),
+    scaledSize: new google.maps.Size(tw + 14, 18)
+  };
+}
+
+function makeIncidentIcon(incId) {
+  var tw = incId.length * 7 + 8;
+  var svg = '<svg xmlns="http://www.w3.org/2000/svg" width="' + (tw + 28) + '" height="22">' +
+    '<polygon points="11,2 20,20 2,20" fill="#f0883e" stroke="#fff" stroke-width="1.2"/>' +
+    '<text x="11" y="17" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="bold" fill="white">!</text>' +
+    '<rect x="24" y="3" width="' + tw + '" height="16" rx="3" fill="rgba(240,136,62,0.92)"/>' +
+    '<text x="28" y="15" font-family="monospace" font-size="10" fill="white">' + incId + '</text>' +
+    '</svg>';
+  return {
+    url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg),
+    anchor: new google.maps.Point(11, 20),
+    scaledSize: new google.maps.Size(tw + 28, 22)
+  };
+}
+
+function loadHistory() {
+  fetch('/api/pta/gps/history')
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      clearRoute();
+      var pts = data.points || [];
+      if (pts.length === 0) return;
+      pts.forEach(function (p) {
+        var pos = {lat: p.lat, lng: p.lon};
+        var m;
+        if (p.incident) {
+          var incId = formatIncidentId(p.ts);
+          m = new google.maps.Marker({
+            position: pos, map: map,
+            icon: makeIncidentIcon(incId),
+            title: incId, zIndex: 5
+          });
+          (function (iId, iTs, iNote) {
+            m.addListener('click', function () {
+              info.setContent(
+                '<b style="color:#f0883e">' + iId + '</b>' +
+                '<div style="font-size:11px;margin-top:6px;min-width:170px">' +
+                '<div>Time: ' + formatUTC8(iTs) + '  (+8 GMT)</div>' +
+                (iNote ? '<div style="margin-top:3px">Note: ' + iNote + '</div>' : '') +
+                '<div style="margin-top:5px;color:#f0883e;font-weight:600;letter-spacing:.5px">STATUS: OPEN</div>' +
+                '</div>'
+              );
+              info.open(map, m);
+            });
+          })(incId, p.ts, p.incidentNote || '');
+        } else {
+          m = new google.maps.Marker({
+            position: pos, map: map,
+            icon: makeRouteIcon(formatUTC8(p.ts)),
+            zIndex: 1
+          });
+        }
+        routeMarkers.push(m);
+      });
+    })
+    .catch(function (e) { console.warn('Route history load failed:', e); });
+}
+
 function headingArrow(deg) {
   if (deg == null) return '—';
   var dirs = ['N','NE','E','SE','S','SW','W','NW'];
   return dirs[Math.round(deg / 45) % 8] + ' ' + Math.round(deg) + '\xb0';
 }
+
 function poll() {
   fetch('/api/pta/gps')
-    .then(function(r){ return r.json(); })
-    .then(function(d){
+    .then(function (r) { return r.json(); })
+    .then(function (d) {
       if (d.found) {
         var pos = {lat: d.lat, lng: d.lon};
-        map.setCenter(pos); marker.setPosition(pos);
+        map.setCenter(pos);
+        marker.setPosition(pos);
+        marker.setVisible(true);
         info.setContent(
           '<b style="color:#1a73e8">' + d.device_id + '</b>' +
           '<table style="font-size:12px;margin-top:4px;min-width:190px">' +
@@ -1391,7 +1607,7 @@ function poll() {
           '<tr><td>Accuracy</td><td>&nbsp;\xb1' + d.accuracy.toFixed(0) + ' m</td></tr>' +
           '<tr><td>Speed</td><td>&nbsp;' + d.speed_kmh.toFixed(1) + ' km/h</td></tr>' +
           '<tr><td>Heading</td><td>&nbsp;' + headingArrow(d.heading) + '</td></tr>' +
-          '<tr><td>Updated</td><td>&nbsp;' + (d.ts ? new Date(d.ts*1000).toLocaleTimeString() : '—') + '</td></tr>' +
+          '<tr><td>Updated</td><td>&nbsp;' + (d.ts ? new Date(d.ts * 1000).toLocaleTimeString() : '—') + '</td></tr>' +
           '</table>');
         info.open(map, marker);
         document.getElementById('status').textContent =
@@ -1404,7 +1620,7 @@ function poll() {
       }
       document.getElementById('ts').textContent = 'Updated ' + new Date().toLocaleTimeString();
     })
-    .catch(function(e){ document.getElementById('status').textContent = 'Error: ' + e.message; });
+    .catch(function (e) { document.getElementById('status').textContent = 'Error: ' + e.message; });
 }
 </script>
 <script src="https://maps.googleapis.com/maps/api/js?key=""" + _PTA_MAPS_KEY + """&callback=initPTAMap" async defer></script>
