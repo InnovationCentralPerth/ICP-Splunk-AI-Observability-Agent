@@ -1308,7 +1308,7 @@ async def get_pta_gps():
             f"{SPLUNK_MGMT_URL}/services/search/jobs/export",
             auth=(SPLUNK_USERNAME, SPLUNK_PASSWORD),
             data={"search": spl, "output_mode": "json",
-                  "exec_mode": "oneshot", "earliest_time": "-1h", "latest_time": "now"},
+                  "exec_mode": "oneshot", "earliest_time": "0", "latest_time": "now"},
             verify=False, timeout=15,
         )
         for line in resp.text.strip().split("\n"):
@@ -1404,6 +1404,41 @@ async def get_pta_gps_history():
     return {"points": filtered}
 
 
+@app.get("/api/pta/gps/route")
+async def get_pta_gps_route():
+    """Return all raw GPS points (unfiltered) for drawing the route polyline."""
+    spl = (
+        'search index=pta sourcetype="pta:gps_location" earliest=0 latest=now '
+        '| eval ts=_time '
+        '| fields ts latitude longitude '
+        '| sort 0 ts'
+    )
+    try:
+        resp = requests.post(
+            f"{SPLUNK_MGMT_URL}/services/search/jobs/export",
+            auth=(SPLUNK_USERNAME, SPLUNK_PASSWORD),
+            data={"search": spl, "output_mode": "json",
+                  "exec_mode": "oneshot", "earliest_time": "0", "latest_time": "now"},
+            verify=False, timeout=30,
+        )
+        points: list[dict] = []
+        for line in resp.text.strip().split("\n"):
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line.strip())
+                if "result" in obj:
+                    r = obj["result"]
+                    lat, lon, ts = r.get("latitude"), r.get("longitude"), r.get("ts")
+                    if lat and lon and ts:
+                        points.append({"lat": float(lat), "lon": float(lon), "ts": float(ts)})
+            except Exception:
+                pass
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"points": points}
+
+
 @app.post("/api/pta/reset")
 async def reset_pta_gps():
     """Delete all GPS events from the pta Splunk index."""
@@ -1458,6 +1493,7 @@ _PTA_MAP_HTML = """<!DOCTYPE html>
 var REFRESH = 15000;
 var map, marker, info;
 var routeMarkers = [];
+var trackLine = null;
 
 window.initPTAMap = function () {
   map = new google.maps.Map(document.getElementById('map'), {
@@ -1470,9 +1506,11 @@ window.initPTAMap = function () {
     visible: false, zIndex: 10
   });
   info = new google.maps.InfoWindow();
+  loadRoute();
   loadHistory();
   poll();
   setInterval(poll, REFRESH);
+  setInterval(loadRoute, REFRESH * 4);
   setInterval(loadHistory, REFRESH * 4);
 
   document.getElementById('resetBtn').addEventListener('click', function () {
@@ -1493,6 +1531,27 @@ window.initPTAMap = function () {
 function clearRoute() {
   routeMarkers.forEach(function (m) { m.setMap(null); });
   routeMarkers = [];
+  if (trackLine) { trackLine.setMap(null); trackLine = null; }
+}
+
+function loadRoute() {
+  fetch('/api/pta/gps/route')
+    .then(function (r) { return r.json(); })
+    .then(function (data) {
+      if (trackLine) { trackLine.setMap(null); trackLine = null; }
+      var pts = data.points || [];
+      if (pts.length < 2) return;
+      trackLine = new google.maps.Polyline({
+        path: pts.map(function (p) { return {lat: p.lat, lng: p.lon}; }),
+        geodesic: true,
+        strokeColor: '#FFD700',
+        strokeOpacity: 0.75,
+        strokeWeight: 3,
+        zIndex: 0,
+        map: map
+      });
+    })
+    .catch(function (e) { console.warn('Route load failed:', e); });
 }
 
 function formatUTC8(ts) {
@@ -1548,6 +1607,10 @@ function loadHistory() {
       clearRoute();
       var pts = data.points || [];
       if (pts.length === 0) return;
+      if (!marker.getVisible()) {
+        var last = pts[pts.length - 1];
+        map.setCenter({lat: last.lat, lng: last.lon});
+      }
       pts.forEach(function (p) {
         var pos = {lat: p.lat, lng: p.lon};
         var m;
@@ -1562,7 +1625,7 @@ function loadHistory() {
             m.addListener('click', function () {
               info.setContent(
                 '<b style="color:#f0883e">' + iId + '</b>' +
-                '<div style="font-size:11px;margin-top:6px;min-width:170px">' +
+                '<div style="font-size:11px;margin-top:6px;min-width:170px;color:#333">' +
                 '<div>Time: ' + formatUTC8(iTs) + '  (+8 GMT)</div>' +
                 (iNote ? '<div style="margin-top:3px">Note: ' + iNote + '</div>' : '') +
                 '<div style="margin-top:5px;color:#f0883e;font-weight:600;letter-spacing:.5px">STATUS: OPEN</div>' +
