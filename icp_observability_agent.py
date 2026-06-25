@@ -115,9 +115,9 @@ CAMERAS = [
     {"serial": "Q2GV-MGCS-QRM5", "name": "ICP Demo Area",
      "mac": "34:56:fe:a3:a7:d6",
      "zones": [{"id": "0", "label": "Full Frame"}]},
-    {"serial": "Q2GV-XPS8-82TX", "name": "ICP Workshop",
-     "mac": "34:56:fe:a3:a7:cd",
-     "zones": [{"id": "0", "label": "Full Frame"}]},
+    # {"serial": "Q2GV-XPS8-82TX", "name": "ICP Workshop",
+    #  "mac": "34:56:fe:a3:a7:cd",
+    #  "zones": [{"id": "0", "label": "Full Frame"}]},  # camera inactive
 ]
 
 MT10_SERIAL = "Q3CA-7SBV-ZCTA"
@@ -1457,6 +1457,57 @@ async def reset_pta_gps():
         raise HTTPException(status_code=503, detail=str(e))
 
 
+@app.post("/api/pta/incident/note")
+async def update_incident_note(payload: dict):
+    """Delete the original incident event and re-insert with an updated note."""
+    ts   = float(payload.get("ts", 0))
+    lat  = float(payload.get("lat", 0))
+    lon  = float(payload.get("lon", 0))
+    note = str(payload.get("note", ""))
+
+    # Delete the existing incident event within a ±1 s window around ts
+    del_spl = (
+        f'search index=pta sourcetype="pta:gps_location" incident=true '
+        f'earliest={ts - 1} latest={ts + 2} '
+        f'| where _time >= {ts - 0.5} AND _time <= {ts + 0.5} | delete'
+    )
+    try:
+        requests.post(
+            f"{SPLUNK_MGMT_URL}/services/search/jobs",
+            auth=(SPLUNK_USERNAME, SPLUNK_PASSWORD),
+            data={"search": del_spl, "output_mode": "json", "exec_mode": "oneshot"},
+            verify=False, timeout=20,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
+
+    # Re-insert with the exact original timestamp and updated note
+    hec_payload = {
+        "time":       ts,
+        "sourcetype": "pta:gps_location",
+        "index":      "pta",
+        "event": {
+            "latitude":     lat,
+            "longitude":    lon,
+            "incident":     True,
+            "incidentNote": note,
+            "vehicleId":    "edit",
+        },
+    }
+    try:
+        resp = requests.post(
+            SPLUNK_HEC_URL,
+            headers={"Authorization": f"Splunk {_PTA_HEC_TOKEN}"},
+            json=hec_payload,
+            verify=False, timeout=10,
+        )
+        if resp.ok:
+            return {"status": "ok"}
+        raise HTTPException(status_code=502, detail=resp.text)
+    except requests.RequestException as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
 _PTA_MAP_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1494,6 +1545,71 @@ var REFRESH = 15000;
 var map, marker, info;
 var routeMarkers = [];
 var trackLine = null;
+var currentIncident = null;
+
+function escH(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function buildIncidentContent(iId, iTs, iNote) {
+  var noteHtml = iNote
+    ? 'Note: ' + escH(iNote)
+    : '<span style="color:#999">No note</span>';
+  return (
+    '<b style="color:#f0883e">' + escH(iId) + '</b>' +
+    '<div style="font-size:11px;margin-top:6px;min-width:210px;color:#333">' +
+    '<div>Time: ' + formatUTC8(iTs) + '  (+8 GMT)</div>' +
+    '<div id="inc-note-display" style="margin-top:3px">' + noteHtml + '</div>' +
+    '<div style="margin-top:5px;display:flex;align-items:center;gap:8px">' +
+    '<span style="color:#f0883e;font-weight:600;letter-spacing:.5px">STATUS: OPEN</span>' +
+    '<button onclick="showNoteEdit()" style="background:transparent;border:1px solid #f0883e;' +
+    'color:#f0883e;border-radius:3px;padding:1px 8px;font-size:10px;cursor:pointer;font-weight:600">EDIT</button>' +
+    '</div>' +
+    '<div id="inc-edit-area" style="display:none;margin-top:7px">' +
+    '<input id="inc-note-input" type="text" value="' + escH(iNote) + '" placeholder="Incident note…" ' +
+    'style="width:100%;padding:4px 6px;border:1px solid #d0d7de;border-radius:4px;font-size:11px;box-sizing:border-box">' +
+    '<button onclick="submitNoteUpdate()" id="inc-update-btn" ' +
+    'style="margin-top:4px;background:#f0883e;border:none;color:#fff;border-radius:4px;' +
+    'padding:3px 12px;font-size:11px;cursor:pointer;font-weight:600">UPDATE</button>' +
+    '</div>' +
+    '</div>'
+  );
+}
+
+function showNoteEdit() {
+  var area = document.getElementById('inc-edit-area');
+  if (area) area.style.display = 'block';
+  var inp = document.getElementById('inc-note-input');
+  if (inp) { inp.focus(); inp.select(); }
+}
+
+function submitNoteUpdate() {
+  if (!currentIncident) return;
+  var inp = document.getElementById('inc-note-input');
+  if (!inp) return;
+  var newNote = inp.value.trim();
+  var btn = document.getElementById('inc-update-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  fetch('/api/pta/incident/note', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ts: currentIncident.ts, lat: currentIncident.lat, lon: currentIncident.lon, note: newNote})
+  })
+  .then(function (r) { return r.json(); })
+  .then(function () {
+    currentIncident.note = newNote;
+    var nd = document.getElementById('inc-note-display');
+    if (nd) nd.innerHTML = newNote ? 'Note: ' + escH(newNote) : '<span style="color:#999">No note</span>';
+    var area = document.getElementById('inc-edit-area');
+    if (area) area.style.display = 'none';
+    if (btn) { btn.disabled = false; btn.textContent = 'UPDATE'; }
+    loadHistory();
+  })
+  .catch(function (e) {
+    alert('Update failed: ' + e.message);
+    if (btn) { btn.disabled = false; btn.textContent = 'UPDATE'; }
+  });
+}
 
 window.initPTAMap = function () {
   map = new google.maps.Map(document.getElementById('map'), {
@@ -1528,9 +1644,13 @@ window.initPTAMap = function () {
   });
 };
 
-function clearRoute() {
+function clearMarkers() {
   routeMarkers.forEach(function (m) { m.setMap(null); });
   routeMarkers = [];
+}
+
+function clearRoute() {
+  clearMarkers();
   if (trackLine) { trackLine.setMap(null); trackLine = null; }
 }
 
@@ -1550,6 +1670,11 @@ function loadRoute() {
         zIndex: 0,
         map: map
       });
+      if (!marker.getVisible()) {
+        var bounds = new google.maps.LatLngBounds();
+        pts.forEach(function (p) { bounds.extend({lat: p.lat, lng: p.lon}); });
+        map.fitBounds(bounds);
+      }
     })
     .catch(function (e) { console.warn('Route load failed:', e); });
 }
@@ -1604,7 +1729,7 @@ function loadHistory() {
   fetch('/api/pta/gps/history')
     .then(function (r) { return r.json(); })
     .then(function (data) {
-      clearRoute();
+      clearMarkers();
       var pts = data.points || [];
       if (pts.length === 0) return;
       if (!marker.getVisible()) {
@@ -1621,19 +1746,13 @@ function loadHistory() {
             icon: makeIncidentIcon(incId),
             title: incId, zIndex: 5
           });
-          (function (iId, iTs, iNote) {
+          (function (iId, iTs, iNote, iLat, iLon) {
             m.addListener('click', function () {
-              info.setContent(
-                '<b style="color:#f0883e">' + iId + '</b>' +
-                '<div style="font-size:11px;margin-top:6px;min-width:170px;color:#333">' +
-                '<div>Time: ' + formatUTC8(iTs) + '  (+8 GMT)</div>' +
-                (iNote ? '<div style="margin-top:3px">Note: ' + iNote + '</div>' : '') +
-                '<div style="margin-top:5px;color:#f0883e;font-weight:600;letter-spacing:.5px">STATUS: OPEN</div>' +
-                '</div>'
-              );
+              currentIncident = {id: iId, ts: iTs, lat: iLat, lon: iLon, note: iNote};
+              info.setContent(buildIncidentContent(iId, iTs, iNote));
               info.open(map, m);
             });
-          })(incId, p.ts, p.incidentNote || '');
+          })(incId, p.ts, p.incidentNote || '', p.lat, p.lon);
         } else {
           m = new google.maps.Marker({
             position: pos, map: map,
